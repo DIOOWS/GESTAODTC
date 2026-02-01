@@ -1,73 +1,63 @@
 import os
 from sqlalchemy import create_engine, text
 
-
 def get_engine():
-    url = os.getenv("DATABASE_URL")
+    url = os.getenv("DATABASE_URL", "").strip()
     if not url:
-        raise RuntimeError("DATABASE_URL não definida. Configure a variável de ambiente DATABASE_URL.")
+        raise RuntimeError("DATABASE_URL não definida nas variáveis de ambiente.")
     url = url.replace("postgres://", "postgresql://", 1)
     return create_engine(url, pool_pre_ping=True)
-
 
 def init_db(engine):
     with engine.begin() as conn:
         conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS produtos (
+        CREATE TABLE IF NOT EXISTS branches (
             id SERIAL PRIMARY KEY,
-            nome TEXT NOT NULL UNIQUE,
-            categoria TEXT,
-            ativo BOOLEAN NOT NULL DEFAULT TRUE
-        );
-        """))
-
-        # Internamente é "locais", mas na UI chamamos de "filiais"
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS locais (
-            id SERIAL PRIMARY KEY,
-            nome TEXT NOT NULL UNIQUE
+            name TEXT UNIQUE NOT NULL
         );
         """))
 
         conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS registros_diarios (
+        CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
-            data DATE NOT NULL,
-            produto_id INT NOT NULL REFERENCES produtos(id) ON DELETE CASCADE,
-            local_id   INT NOT NULL REFERENCES locais(id)   ON DELETE CASCADE,
-
-            estoque NUMERIC(12,2),
-            produzido NUMERIC(12,2),
-            vendido NUMERIC(12,2),
-            desperdicio NUMERIC(12,2),
-            total NUMERIC(12,2),
-
-            produzido_planejado NUMERIC(12,2),
-            observacoes TEXT,
-
-            UNIQUE (data, produto_id, local_id)
+            name TEXT NOT NULL,
+            category TEXT,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            UNIQUE (name, COALESCE(category,''))
         );
         """))
 
         conn.execute(text("""
-        ALTER TABLE registros_diarios
-        ADD COLUMN IF NOT EXISTS produzido_planejado NUMERIC(12,2);
-        """))
-
-        # Transferências (Envio origem -> destino)
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS transferencias (
+        CREATE TABLE IF NOT EXISTS daily_records (
             id SERIAL PRIMARY KEY,
-            data DATE NOT NULL,
-            produto_id INT NOT NULL REFERENCES produtos(id) ON DELETE CASCADE,
-            origem_local_id INT NOT NULL REFERENCES locais(id) ON DELETE CASCADE,
-            destino_local_id INT NOT NULL REFERENCES locais(id) ON DELETE CASCADE,
-            quantidade NUMERIC(12,2) NOT NULL,
-            observacoes TEXT,
-            UNIQUE (data, produto_id, origem_local_id, destino_local_id)
+            day DATE NOT NULL,
+            branch_id INT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+            product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+
+            stock_qty NUMERIC(12,2) DEFAULT 0,
+            produced_planned NUMERIC(12,2) DEFAULT 0,
+            produced_real NUMERIC(12,2) DEFAULT 0,
+            sold_qty NUMERIC(12,2) DEFAULT 0,
+            waste_qty NUMERIC(12,2) DEFAULT 0,
+
+            notes TEXT,
+            UNIQUE (day, branch_id, product_id)
         );
         """))
 
-        # Filiais fixas (você não cadastra nada)
-        conn.execute(text("INSERT INTO locais(nome) VALUES ('AUSTIN') ON CONFLICT (nome) DO NOTHING;"))
-        conn.execute(text("INSERT INTO locais(nome) VALUES ('QUEIMADOS') ON CONFLICT (nome) DO NOTHING;"))
+        # (opcional, pra depois) transferências entre filiais
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS transfers (
+            id SERIAL PRIMARY KEY,
+            day DATE NOT NULL,
+            from_branch_id INT NOT NULL REFERENCES branches(id),
+            to_branch_id INT NOT NULL REFERENCES branches(id),
+            product_id INT NOT NULL REFERENCES products(id),
+            qty NUMERIC(12,2) NOT NULL DEFAULT 0,
+            notes TEXT
+        );
+        """))
+
+        # seed branches
+        conn.execute(text("INSERT INTO branches(name) VALUES ('AUSTIN') ON CONFLICT(name) DO NOTHING;"))
+        conn.execute(text("INSERT INTO branches(name) VALUES ('QUEIMADOS') ON CONFLICT(name) DO NOTHING;"))

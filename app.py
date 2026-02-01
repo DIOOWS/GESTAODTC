@@ -1,14 +1,9 @@
 import os
-import re
-
 import streamlit as st
-import pandas as pd
 from sqlalchemy import text
 
 from db import get_engine, init_db
-
-from ui import painel, produtos, lancamentos, relatorios, importar_excel, importar_whatsapp
-
+from ui import painel, produtos, lancamentos, relatorios, importar_excel, importar_whatsapp, estoque
 
 st.set_page_config(page_title="Padaria | Controle", layout="wide")
 
@@ -31,73 +26,63 @@ div[data-testid="stDataFrame"] { background: var(--panel); border-radius: 12px; 
 </style>
 """, unsafe_allow_html=True)
 
-# Login opcional
+# Login simples
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 if APP_PASSWORD:
-    senha = st.sidebar.text_input("Senha", type="password")
-    if senha != APP_PASSWORD:
+    pw = st.sidebar.text_input("Senha", type="password")
+    if pw != APP_PASSWORD:
         st.sidebar.info("Digite a senha para acessar.")
         st.stop()
 
 engine = get_engine()
 init_db(engine)
 
-
-def qdf(sql: str, params=None) -> pd.DataFrame:
+def get_branch_id(name: str) -> int:
     with engine.begin() as conn:
-        return pd.read_sql(text(sql), conn, params=params or {})
+        r = conn.execute(text("SELECT id FROM branches WHERE name=:n"), {"n": name.upper().strip()}).fetchone()
+        return int(r[0])
 
+def garantir_produto(conn, produto: str, categoria: str | None):
+    # produto sem repetir categoria
+    p = (produto or "").strip().upper()
+    c = (categoria or "").strip().upper() or None
 
-def qexec(sql: str, params=None) -> None:
-    with engine.begin() as conn:
-        conn.execute(text(sql), params or {})
+    conn.execute(text("""
+        INSERT INTO products(name, category)
+        VALUES (:n,:c)
+        ON CONFLICT (name, COALESCE(category,'')) DO NOTHING;
+    """), {"n": p, "c": c})
 
+    r = conn.execute(text("""
+        SELECT id FROM products
+        WHERE name=:n AND COALESCE(category,'') = COALESCE(:c,'')
+    """), {"n": p, "c": c or ""}).fetchone()
 
-def normalizar_upper(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip()).upper()
+    return int(r[0])
 
+# Sidebar
+st.sidebar.title("🍞 Padaria")
+page = st.sidebar.radio("Menu", [
+    "Painel",
+    "Produtos",
+    "Estoque",
+    "Lançamentos",
+    "Relatórios",
+    "Importar Excel",
+    "Importar WhatsApp"
+])
 
-def get_filial_id(nome_filial: str) -> int:
-    nome = normalizar_upper(nome_filial)
-    df = qdf("SELECT id FROM locais WHERE nome=:n;", {"n": nome})
-    return int(df["id"].iloc[0])
-
-
-def garantir_produto(nome_produto: str, categoria: str | None = None) -> int:
-    nome = normalizar_upper(nome_produto)
-    cat = normalizar_upper(categoria) if categoria else None
-    qexec("""
-        INSERT INTO produtos(nome, categoria, ativo)
-        VALUES (:n, :c, TRUE)
-        ON CONFLICT (nome)
-        DO UPDATE SET categoria = COALESCE(EXCLUDED.categoria, produtos.categoria),
-                      ativo = TRUE;
-    """, {"n": nome, "c": cat})
-    df = qdf("SELECT id FROM produtos WHERE nome = :n;", {"n": nome})
-    return int(df["id"].iloc[0])
-
-
-st.sidebar.title("📦 Padaria")
-
-menu = st.sidebar.radio(
-    "Menu",
-    ["Painel", "Produtos", "Lançamentos", "Relatórios", "Importar Excel", "Importar WhatsApp"]
-)
-
-if menu == "Painel":
-    painel.render(st, qdf)
-
-elif menu == "Produtos":
-    produtos.render(st, qdf, garantir_produto, qexec)
-
-elif menu == "Lançamentos":
-    lancamentos.render(st, qdf, qexec, garantir_produto, get_filial_id)
-
-elif menu == "Relatórios":
-    relatorios.render(st, qdf)
-
-elif menu == "Importar Excel":
-    importar_excel.render(st, qdf, qexec)
-
-elif menu == "Importar WhatsApp":
-    importar_whatsapp.render(st, qdf, qexec, garantir_produto, get_filial_id)
+if page == "Painel":
+    painel.render(st, engine, get_branch_id)
+elif page == "Produtos":
+    produtos.render(st, engine)
+elif page == "Estoque":
+    estoque.render(st, engine, garantir_produto, get_branch_id)
+elif page == "Lançamentos":
+    lancamentos.render(st, engine, garantir_produto, get_branch_id)
+elif page == "Relatórios":
+    relatorios.render(st, engine)
+elif page == "Importar Excel":
+    importar_excel.render(st, engine)
+else:
+    importar_whatsapp.render(st, engine, garantir_produto, get_branch_id)

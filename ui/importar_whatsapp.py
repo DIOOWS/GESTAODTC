@@ -1,59 +1,53 @@
-from datetime import date
 import pandas as pd
+from sqlalchemy import text
+from datetime import date
 from services.whatsapp_parser import parse_whatsapp_text
 
+def render(st, engine, garantir_produto, get_branch_id):
+    st.header("Importar WhatsApp (texto)")
 
-def render(st, qdf, qexec, garantir_produto, get_filial_id):
-    st.header("Importar WhatsApp (texto livre)")
+    branch = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
+    branch_id = get_branch_id(branch)
 
-    filial = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
-    data_ref = st.date_input("Data", value=date.today())
+    day = st.date_input("Data", value=date.today())
 
-    modo = st.radio("Salvar como:", ["Estoque (contagem)", "Produzido planejado"], horizontal=True)
+    mode = st.radio("Salvar como:", ["Estoque (contagem)", "Produzido planejado"], horizontal=True)
 
-    texto = st.text_area("Cole o texto aqui", height=320)
-
+    txt = st.text_area("Cole o texto aqui", height=220)
     if st.button("Processar"):
-        itens = parse_whatsapp_text(texto)
-        if not itens:
-            st.warning("Não identifiquei itens.")
-            st.stop()
+        items = parse_whatsapp_text(txt)
+        if not items:
+            st.warning("Não consegui identificar linhas com quantidade.")
+            return
 
-        df_prev = pd.DataFrame([{
-            "Categoria": i.categoria,
-            "Produto": i.produto,
-            "Quantidade": i.quantidade
-        } for i in itens])
-        st.session_state["imp_itens"] = itens
-        st.dataframe(df_prev, use_container_width=True, hide_index=True)
+        df = pd.DataFrame([{"categoria": i.category, "produto": i.product, "qtd": i.qty} for i in items])
+        st.session_state["_wa_preview"] = df
+        st.success(f"Itens encontrados: {len(df)}")
 
-    if st.session_state.get("imp_itens"):
-        if st.button("Salvar"):
-            itens = st.session_state["imp_itens"]
-            local_id = get_filial_id(filial)
-            salvos = 0
+    if "_wa_preview" in st.session_state:
+        df = st.session_state["_wa_preview"]
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-            for it in itens:
-                nome_prod = f"{it.categoria} - {it.produto}"
-                pid = garantir_produto(nome_prod, it.categoria)
+        if st.button("Salvar no banco"):
+            with engine.begin() as conn:
+                for _, r in df.iterrows():
+                    pid = garantir_produto(conn, r["produto"], r["categoria"])
 
-                if modo.startswith("Estoque"):
-                    qexec("""
-                        INSERT INTO registros_diarios (data, produto_id, local_id, estoque)
-                        VALUES (:data, :pid, :lid, :qtd)
-                        ON CONFLICT (data, produto_id, local_id)
-                        DO UPDATE SET estoque=EXCLUDED.estoque;
-                    """, {"data": data_ref, "pid": pid, "lid": local_id, "qtd": it.quantidade})
-                else:
-                    qexec("""
-                        INSERT INTO registros_diarios (data, produto_id, local_id, produzido_planejado)
-                        VALUES (:data, :pid, :lid, :qtd)
-                        ON CONFLICT (data, produto_id, local_id)
-                        DO UPDATE SET produzido_planejado=EXCLUDED.produzido_planejado;
-                    """, {"data": data_ref, "pid": pid, "lid": local_id, "qtd": it.quantidade})
+                    if mode.startswith("Estoque"):
+                        conn.execute(text("""
+                            INSERT INTO daily_records(day, branch_id, product_id, stock_qty)
+                            VALUES (:day,:bid,:pid,:v)
+                            ON CONFLICT (day, branch_id, product_id)
+                            DO UPDATE SET stock_qty = EXCLUDED.stock_qty;
+                        """), {"day": day, "bid": branch_id, "pid": pid, "v": float(r["qtd"] or 0)})
+                    else:
+                        conn.execute(text("""
+                            INSERT INTO daily_records(day, branch_id, product_id, produced_planned)
+                            VALUES (:day,:bid,:pid,:v)
+                            ON CONFLICT (day, branch_id, product_id)
+                            DO UPDATE SET produced_planned = EXCLUDED.produced_planned;
+                        """), {"day": day, "bid": branch_id, "pid": pid, "v": float(r["qtd"] or 0)})
 
-                salvos += 1
-
-            st.success(f"Salvo! Itens: {salvos}")
-            st.session_state["imp_itens"] = []
+            st.success("Salvo!")
+            del st.session_state["_wa_preview"]
             st.rerun()

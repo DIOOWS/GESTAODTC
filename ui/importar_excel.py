@@ -1,35 +1,30 @@
-from services import excel_import
+from sqlalchemy import text
+from services.excel_import import load_products_from_excel
 
+def render(st, engine):
+    st.header("Importar Excel (cadastro de produtos)")
 
-def render(st, qdf, qexec):
-    st.header("Importar Excel")
-    st.caption("Importe cadastro de produtos e tortas como cadastro.")
+    st.caption("Importa PRODUTO + CATEGORIA e grava em Produtos. Não cria lançamentos.")
 
-    tipo = st.radio(
-        "O que você quer importar?",
-        ["Cadastro (produtos + categoria) do RELATORIO",
-         "Tortas (cadastro de produtos apenas)"]
-    )
+    f = st.file_uploader("Selecione o Excel", type=["xlsx"])
+    if not f:
+        return
 
-    arquivo = st.file_uploader("Selecione um arquivo .xlsx", type=["xlsx"])
-    if arquivo is None:
-        st.info("Envie um arquivo .xlsx para importar.")
-        st.stop()
+    try:
+        df = load_products_from_excel(f)
+    except Exception as e:
+        st.error(f"Erro ao ler Excel: {e}")
+        return
 
-    if st.button("Importar agora"):
-        try:
-            if tipo.startswith("Cadastro"):
-                r = excel_import.importar_cadastro_produtos_do_relatorio(qexec, qdf, arquivo)
-                st.success(f"Cadastro importado! Abas: {r['abas']} | Processados: {r['processados']} | Ignorados: {r['ignorados']} | Total: {r['total']}")
-            else:
-                r = excel_import.importar_tortas_modelo_novo(qexec, qdf, arquivo)
-                st.success(f"Tortas cadastradas! Aba: {r['aba']} | Produtos: {r['produtos_cadastrados']} | Ignorados: {r['ignorados']}")
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-            st.info("Resumo do banco")
-            st.write("Produtos:", int(qdf("SELECT COUNT(*) AS n FROM produtos;")["n"].iloc[0]))
-            st.write("Registros:", int(qdf("SELECT COUNT(*) AS n FROM registros_diarios;")["n"].iloc[0]))
-            st.write("Transferências:", int(qdf("SELECT COUNT(*) AS n FROM transferencias;")["n"].iloc[0]))
-
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao importar: {e}")
+    if st.button("Importar produtos"):
+        with engine.begin() as conn:
+            for _, r in df.iterrows():
+                conn.execute(text("""
+                    INSERT INTO products(name, category)
+                    VALUES (:n, :c)
+                    ON CONFLICT (name, COALESCE(category,'')) DO NOTHING;
+                """), {"n": r["produto"], "c": r["categoria"]})
+        st.success("Produtos importados com sucesso!")
+        st.rerun()

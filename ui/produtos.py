@@ -1,31 +1,36 @@
-def render(st, qdf, garantir_produto, qexec):
+import pandas as pd
+from sqlalchemy import text
+
+def render(st, engine):
     st.header("Produtos")
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        df = qdf('SELECT id AS "ID", nome AS "Produto", categoria AS "Categoria", ativo AS "Ativo" FROM produtos ORDER BY nome;')
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    with engine.begin() as conn:
+        df = pd.read_sql(text("""
+            SELECT id, name AS produto, category AS categoria, active AS ativo
+            FROM products
+            ORDER BY category NULLS LAST, name;
+        """), conn)
 
-    with col2:
-        st.subheader("Adicionar / Atualizar")
-        nome = st.text_input("Nome do produto")
-        categoria = st.text_input("Categoria")
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-        if st.button("Salvar produto"):
-            if nome.strip():
-                garantir_produto(nome, categoria if categoria.strip() else None)
-                st.success("Produto salvo!")
-                st.rerun()
-            else:
-                st.warning("O nome do produto é obrigatório.")
+    st.subheader("Adicionar produto")
+    c1,c2 = st.columns(2)
+    with c1:
+        prod = st.text_input("Produto (somente nome/sabor)")
+    with c2:
+        cat = st.text_input("Categoria (ex: BOLO RETANGULAR, ASSADOS, TORTAS)")
 
-        st.divider()
-        st.subheader("Excluir produto (cuidado)")
-        dfp = qdf('SELECT id, nome FROM produtos ORDER BY nome;')
-        if not dfp.empty:
-            escolhido = st.selectbox("Produto para excluir", dfp["nome"].tolist())
-            pid = int(dfp.loc[dfp["nome"] == escolhido, "id"].iloc[0])
-            if st.button("Excluir produto"):
-                qexec("DELETE FROM produtos WHERE id = :id;", {"id": pid})
-                st.success("Produto excluído.")
-                st.rerun()
+    if st.button("Salvar produto"):
+        p = (prod or "").strip().upper()
+        c = (cat or "").strip().upper() or None
+        if not p:
+            st.warning("Produto é obrigatório.")
+            return
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO products(name, category)
+                VALUES (:n, :c)
+                ON CONFLICT (name, COALESCE(category,'')) DO NOTHING;
+            """), {"n": p, "c": c})
+        st.success("Salvo!")
+        st.rerun()
