@@ -1,0 +1,20 @@
+# ambiente virtual
+.venv/
+venv/
+env/
+
+# cache python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# arquivos de sistema
+.DS_Store
+Thumbs.db
+
+# streamlit
+.streamlit/
+
+# arquivos locais (se quiser)
+*.log
