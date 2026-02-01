@@ -1,53 +1,48 @@
-import pandas as pd
-from sqlalchemy import text
 from datetime import date
-from services.whatsapp_parser import parse_whatsapp_text
+from services.whatsapp_parser import parse_whatsapp
 
-def render(st, engine, garantir_produto, get_branch_id):
+def render(st, qdf, qexec, garantir_produto, get_filial_id):
     st.header("Importar WhatsApp (texto)")
 
-    branch = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
-    branch_id = get_branch_id(branch)
+    filiais = qdf("SELECT nome FROM filiais ORDER BY nome;")["nome"].tolist()
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        filial_nome = st.selectbox("Filial", filiais)
+        filial_id = get_filial_id(filial_nome)
+    with c2:
+        dia = st.date_input("Data", value=date.today())
 
-    day = st.date_input("Data", value=date.today())
+    modo = st.radio("Salvar como:", ["Estoque (contagem)", "Produzido planejado"], horizontal=True)
+    texto = st.text_area("Cole o texto aqui", height=260)
 
-    mode = st.radio("Salvar como:", ["Estoque (contagem)", "Produzido planejado"], horizontal=True)
-
-    txt = st.text_area("Cole o texto aqui", height=220)
     if st.button("Processar"):
-        items = parse_whatsapp_text(txt)
-        if not items:
-            st.warning("Não consegui identificar linhas com quantidade.")
+        itens = parse_whatsapp(texto)
+        if not itens:
+            st.warning("Não encontrei itens. Cole o texto no formato 'PRODUTO 10' e categorias em linhas separadas.")
             return
 
-        df = pd.DataFrame([{"categoria": i.category, "produto": i.product, "qtd": i.qty} for i in items])
-        st.session_state["_wa_preview"] = df
-        st.success(f"Itens encontrados: {len(df)}")
-
-    if "_wa_preview" in st.session_state:
-        df = st.session_state["_wa_preview"]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.write(f"Itens detectados: {len(itens)}")
+        for it in itens[:10]:
+            st.write(f"- {it.categoria} | {it.produto} = {it.quantidade}")
 
         if st.button("Salvar no banco"):
-            with engine.begin() as conn:
-                for _, r in df.iterrows():
-                    pid = garantir_produto(conn, r["produto"], r["categoria"])
+            for it in itens:
+                pid = garantir_produto(it.categoria, it.produto)
 
-                    if mode.startswith("Estoque"):
-                        conn.execute(text("""
-                            INSERT INTO daily_records(day, branch_id, product_id, stock_qty)
-                            VALUES (:day,:bid,:pid,:v)
-                            ON CONFLICT (day, branch_id, product_id)
-                            DO UPDATE SET stock_qty = EXCLUDED.stock_qty;
-                        """), {"day": day, "bid": branch_id, "pid": pid, "v": float(r["qtd"] or 0)})
-                    else:
-                        conn.execute(text("""
-                            INSERT INTO daily_records(day, branch_id, product_id, produced_planned)
-                            VALUES (:day,:bid,:pid,:v)
-                            ON CONFLICT (day, branch_id, product_id)
-                            DO UPDATE SET produced_planned = EXCLUDED.produced_planned;
-                        """), {"day": day, "bid": branch_id, "pid": pid, "v": float(r["qtd"] or 0)})
+                if modo == "Estoque (contagem)":
+                    qexec("""
+                    INSERT INTO movimentos(dia, filial_id, produto_id, estoque)
+                    VALUES (:dia, :fid, :pid, :q)
+                    ON CONFLICT (dia, filial_id, produto_id)
+                    DO UPDATE SET estoque=EXCLUDED.estoque;
+                    """, {"dia": dia, "fid": filial_id, "pid": pid, "q": it.quantidade})
+                else:
+                    qexec("""
+                    INSERT INTO movimentos(dia, filial_id, produto_id, produzido_planejado)
+                    VALUES (:dia, :fid, :pid, :q)
+                    ON CONFLICT (dia, filial_id, produto_id)
+                    DO UPDATE SET produzido_planejado=EXCLUDED.produzido_planejado;
+                    """, {"dia": dia, "fid": filial_id, "pid": pid, "q": it.quantidade})
 
-            st.success("Salvo!")
-            del st.session_state["_wa_preview"]
+            st.success("OK! Importação salva.")
             st.rerun()

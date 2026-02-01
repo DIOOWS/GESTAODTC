@@ -1,50 +1,61 @@
 import re
 from dataclasses import dataclass
-from typing import List, Optional
 
 @dataclass
-class ParsedItem:
-    category: str
-    product: str
-    qty: float
+class Item:
+    categoria: str
+    produto: str
+    quantidade: float
 
-def _clean(s: str) -> str:
+def normalizar(s: str) -> str:
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
     return s.upper()
 
-def _is_header(line: str) -> bool:
-    if not line:
-        return False
-    # header: não tem número no final
-    return not re.search(r"\d", line)
+def parse_whatsapp(texto: str):
+    """
+    Aceita textos no estilo:
+      BOLOS CASEIROS
+      AIPIM 8
+      LARANJA 6
 
-def parse_whatsapp_text(text: str) -> List[ParsedItem]:
-    lines = [l.strip() for l in (text or "").splitlines()]
-    items: List[ParsedItem] = []
-    current_category = "GERAL"
+      BOLO RETANGULAR
+      BRIGADEIRO: 4
+      LEITE NINHO 2
 
-    for raw in lines:
-        line = _clean(raw)
-        if not line:
+    Regras:
+      - Linha só com letras vira CATEGORIA
+      - Linha com "nome + número" vira item
+    """
+    linhas = (texto or "").splitlines()
+    categoria_atual = ""
+    itens = []
+
+    for ln in linhas:
+        raw = ln.strip()
+        if not raw:
             continue
 
-        # detecta header (categoria)
-        if _is_header(line) and len(line) <= 40:
-            current_category = line
+        # remove bullets
+        raw = raw.lstrip("-•* ").strip()
+        up = normalizar(raw)
+
+        # categoria: linha sem número e com poucas palavras? (aqui: sem dígitos)
+        if not re.search(r"\d", up):
+            # Ex: "BOLO RETANGULAR", "ROCÂMBOLE"
+            categoria_atual = up
             continue
 
-        # tenta extrair "nome : 10" ou "nome 10"
-        m = re.match(r"^(.*?)(?:\s*[:\-]\s*|\s+)(\d+(?:[.,]\d+)?)\s*$", line)
+        # captura "produto ... numero"
+        m = re.search(r"^(.*?)[\s:]+(\d+(?:[.,]\d+)?)\s*$", up)
         if not m:
             continue
 
-        product = _clean(m.group(1))
-        qty = float(m.group(2).replace(",", "."))
-        if not product:
+        prod = normalizar(m.group(1))
+        qtd = float(m.group(2).replace(",", "."))
+        if not prod:
             continue
 
-        # produto não repete categoria
-        items.append(ParsedItem(category=current_category, product=product, qty=qty))
+        itens.append(Item(categoria=categoria_atual or "(SEM)", produto=prod, quantidade=qtd))
 
-    return items
+    return itens

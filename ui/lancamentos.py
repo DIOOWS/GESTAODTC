@@ -1,96 +1,176 @@
-import pandas as pd
-from sqlalchemy import text
 from datetime import date
-from PIL import Image
+import pandas as pd
 
-from services.ocr_producao import ocr_image_to_text, parse_producao_from_ocr_text
+def render(st, qdf, qexec, garantir_produto, get_filial_id):
+    st.header("Lançamentos")
 
-def render(st, engine, garantir_produto, get_branch_id):
-    st.header("Lançamentos do dia")
+    filiais = qdf("SELECT nome FROM filiais ORDER BY nome;")["nome"].tolist()
+    if not filiais:
+        st.error("Sem filiais cadastradas.")
+        return
 
-    branch = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
-    branch_id = get_branch_id(branch)
+    # Produtos ativos
+    produtos = qdf("""
+    SELECT p.id, COALESCE(c.nome,'(SEM)') AS categoria, p.nome AS produto
+    FROM produtos p
+    LEFT JOIN categorias c ON c.id = p.categoria_id
+    WHERE p.ativo = TRUE
+    ORDER BY c.nome NULLS LAST, p.nome;
+    """)
 
-    day = st.date_input("Data", value=date.today())
-
-    # Manual
-    st.subheader("Lançamento manual (venda / desperdício / produção real)")
-    with engine.begin() as conn:
-        prods = pd.read_sql(text("""
-            SELECT id, name AS produto, COALESCE(category,'') AS categoria
-            FROM products WHERE active=TRUE
-            ORDER BY category NULLS LAST, name;
-        """), conn)
-
-    if prods.empty:
+    if produtos.empty:
         st.info("Cadastre produtos primeiro.")
         return
 
-    prod_label = st.selectbox(
-        "Produto",
-        [f"{r['categoria']} | {r['produto']}".strip(" |") for _, r in prods.iterrows()]
-    )
-    idx = [f"{r['categoria']} | {r['produto']}".strip(" |") for _, r in prods.iterrows()].index(prod_label)
-    pid = int(prods.iloc[idx]["id"])
+    st.caption("Use esta tela para lançar números (manual). Para lote, use Importar WhatsApp/Excel.")
 
-    c1,c2,c3,c4 = st.columns(4)
-    produced_real = c1.number_input("Produção real", min_value=0.0, step=1.0)
-    sold = c2.number_input("Vendido", min_value=0.0, step=1.0)
-    waste = c3.number_input("Desperdício", min_value=0.0, step=1.0)
-    notes = c4.text_input("Obs")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        dia = st.date_input("Data", value=date.today())
+    with c2:
+        filial_nome = st.selectbox("Filial", filiais)
+        filial_id = get_filial_id(filial_nome)
+    with c3:
+        # Mostra "CATEGORIA | PRODUTO"
+        produtos["label"] = produtos["categoria"].astype(str) + " | " + produtos["produto"].astype(str)
+        label = st.selectbox("Produto", produtos["label"].tolist())
+        pid = int(produtos.loc[produtos["label"] == label, "id"].iloc[0])
+
+    st.subheader("Quantidades")
+    a, b, c, d, e, f = st.columns(6)
+    estoque = a.number_input("Estoque", min_value=0.0, step=1.0)
+    prod_real = b.number_input("Produzido (real)", min_value=0.0, step=1.0)
+    prod_plan = c.number_input("Produzido (planejado)", min_value=0.0, step=1.0)
+    enviado = d.number_input("Enviado", min_value=0.0, step=1.0)
+    vendido = e.number_input("Vendido", min_value=0.0, step=1.0)
+    desperd = f.number_input("Desperdício", min_value=0.0, step=1.0)
+    obs = st.text_input("Observações")
 
     if st.button("Salvar lançamento"):
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO daily_records(day, branch_id, product_id, produced_real, sold_qty, waste_qty, notes)
-                VALUES (:day,:bid,:pid,:pr,:s,:w,:n)
-                ON CONFLICT (day, branch_id, product_id)
-                DO UPDATE SET
-                  produced_real = EXCLUDED.produced_real,
-                  sold_qty = EXCLUDED.sold_qty,
-                  waste_qty = EXCLUDED.waste_qty,
-                  notes = EXCLUDED.notes;
-            """), {"day": day, "bid": branch_id, "pid": pid, "pr": produced_real, "s": sold, "w": waste, "n": notes or None})
+        qexec("""
+        INSERT INTO movimentos(dia, filial_id, produto_id, estoque, produzido_real, produzido_planejado, enviado, vendido, desperdicio, observacoes)
+        VALUES (:dia, :fid, :pid, :est, :pr, :pp, :env, :ven, :des, :obs)
+        ON CONFLICT (dia, filial_id, produto_id)
+        DO UPDATE SET
+          estoque=EXCLUDED.estoque,
+          produzido_real=EXCLUDED.produzido_real,
+          produzido_planejado=EXCLUDED.produzido_planejado,
+          enviado=EXCLUDED.enviado,
+          vendido=EXCLUDED.vendido,
+          desperdicio=EXCLUDED.desperdicio,
+          observacoes=EXCLUDED.observacoes;
+        """, {
+            "dia": dia, "fid": filial_id, "pid": pid,
+            "est": estoque, "pr": prod_real, "pp": prod_plan,
+            "env": enviado, "ven": vendido, "des": desperd,
+            "obs": (obs.strip() or None)
+        })
         st.success("Salvo!")
         st.rerun()
 
     st.divider()
+    st.subheader("Lançamentos do dia (filial selecionada)")
+    df = qdf("""
+    SELECT
+      m.id,
+      m.dia,
+      f.nome AS filial,
+      COALESCE(c.nome,'(SEM)') AS categoria,
+      p.nome AS produto,
+      m.estoque,
+      m.produzido_real,
+      m.produzido_planejado,
+      m.enviado,
+      m.vendido,
+      m.desperdicio,
+      m.observacoes
+    FROM movimentos m
+    JOIN filiais f ON f.id=m.filial_id
+    JOIN produtos p ON p.id=m.produto_id
+    LEFT JOIN categorias c ON c.id=p.categoria_id
+    WHERE m.dia=:dia AND m.filial_id=:fid
+    ORDER BY c.nome NULLS LAST, p.nome;
+    """, {"dia": dia, "fid": filial_id})
 
-    # OCR
-    st.subheader("Produção por foto (OCR) — salva como PRODUZIDO PLANEJADO")
-    img = st.file_uploader("Enviar imagem (JPG/PNG)", type=["jpg","jpeg","png"])
-    if img:
-        pil = Image.open(img)
-        st.image(pil, caption="Imagem enviada", use_container_width=True)
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
-        if st.button("Extrair (OCR)"):
-            texto = ocr_image_to_text(pil)
-            st.text_area("OCR bruto", texto, height=200)
+    st.caption("Para excluir/editar em lote, use a aba ESTOQUE.")
 
-            itens = parse_producao_from_ocr_text(texto)
-            if not itens:
-                st.warning("Não consegui extrair itens úteis. Tente uma foto mais reta/mais clara.")
-                return
+def render_transferencias(st, qdf, qexec, garantir_produto, get_filial_id):
+    st.header("Transferências entre filiais")
 
-            df = pd.DataFrame([{"categoria": i.categoria, "produto": i.produto, "qtd": i.quantidade} for i in itens])
-            st.session_state["_ocr_preview"] = df
-            st.success(f"Itens: {len(df)}")
+    filiais = qdf("SELECT nome FROM filiais ORDER BY nome;")["nome"].tolist()
 
-    if "_ocr_preview" in st.session_state:
-        df = st.session_state["_ocr_preview"]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    produtos = qdf("""
+    SELECT p.id, COALESCE(c.nome,'(SEM)') AS categoria, p.nome AS produto
+    FROM produtos p
+    LEFT JOIN categorias c ON c.id = p.categoria_id
+    WHERE p.ativo = TRUE
+    ORDER BY c.nome NULLS LAST, p.nome;
+    """)
+    if produtos.empty:
+        st.info("Cadastre produtos primeiro.")
+        return
 
-        if st.button("Salvar produção planejada"):
-            with engine.begin() as conn:
-                for _, r in df.iterrows():
-                    pid = garantir_produto(conn, r["produto"], r["categoria"])
-                    conn.execute(text("""
-                        INSERT INTO daily_records(day, branch_id, product_id, produced_planned)
-                        VALUES (:day,:bid,:pid,:v)
-                        ON CONFLICT (day, branch_id, product_id)
-                        DO UPDATE SET produced_planned = EXCLUDED.produced_planned;
-                    """), {"day": day, "bid": branch_id, "pid": pid, "v": float(r["qtd"] or 0)})
+    produtos["label"] = produtos["categoria"].astype(str) + " | " + produtos["produto"].astype(str)
 
-            st.success("Produção planejada salva!")
-            del st.session_state["_ocr_preview"]
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        dia = st.date_input("Data", value=date.today())
+    with c2:
+        de_nome = st.selectbox("De", filiais, index=0)
+        para_nome = st.selectbox("Para", filiais, index=min(1, len(filiais)-1))
+    with c3:
+        label = st.selectbox("Produto", produtos["label"].tolist())
+        pid = int(produtos.loc[produtos["label"] == label, "id"].iloc[0])
+
+    if de_nome == para_nome:
+        st.warning("De e Para não podem ser iguais.")
+        return
+
+    qtd = st.number_input("Quantidade", min_value=0.0, step=1.0)
+    obs = st.text_input("Observações (opcional)")
+
+    if st.button("Salvar transferência"):
+        qexec("""
+        INSERT INTO transferencias(dia, produto_id, de_filial_id, para_filial_id, quantidade, observacoes)
+        VALUES (:dia, :pid, :de, :para, :qtd, :obs);
+        """, {
+            "dia": dia,
+            "pid": pid,
+            "de": get_filial_id(de_nome),
+            "para": get_filial_id(para_nome),
+            "qtd": qtd,
+            "obs": (obs.strip() or None)
+        })
+        st.success("OK!")
+        st.rerun()
+
+    st.divider()
+    st.subheader("Transferências do dia")
+    df = qdf("""
+    SELECT
+      t.id,
+      t.dia,
+      f1.nome AS de,
+      f2.nome AS para,
+      COALESCE(c.nome,'(SEM)') AS categoria,
+      p.nome AS produto,
+      t.quantidade,
+      t.observacoes
+    FROM transferencias t
+    JOIN filiais f1 ON f1.id=t.de_filial_id
+    JOIN filiais f2 ON f2.id=t.para_filial_id
+    JOIN produtos p ON p.id=t.produto_id
+    LEFT JOIN categorias c ON c.id=p.categoria_id
+    WHERE t.dia=:dia
+    ORDER BY f1.nome, f2.nome, c.nome NULLS LAST, p.nome;
+    """, {"dia": dia})
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    del_id = st.number_input("Excluir transferência (ID)", min_value=0, step=1)
+    if st.button("Excluir transferência"):
+        if int(del_id) > 0:
+            qexec("DELETE FROM transferencias WHERE id=:id", {"id": int(del_id)})
+            st.success("Excluída.")
             st.rerun()

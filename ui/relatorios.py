@@ -1,9 +1,8 @@
-import pandas as pd
-from sqlalchemy import text
 from datetime import date
+import pandas as pd
 import io
 
-def render(st, engine):
+def render(st, qdf):
     st.header("Relatórios")
 
     c1, c2 = st.columns(2)
@@ -12,25 +11,26 @@ def render(st, engine):
     with c2:
         d2 = st.date_input("Até", value=date.today())
 
-    with engine.begin() as conn:
-        df = pd.read_sql(text("""
-            SELECT
-              r.day AS data,
-              b.name AS filial,
-              COALESCE(p.category,'') AS categoria,
-              p.name AS produto,
-              COALESCE(r.stock_qty,0) AS estoque,
-              COALESCE(r.produced_planned,0) AS produzido_planejado,
-              COALESCE(r.produced_real,0) AS produzido_real,
-              COALESCE(r.sold_qty,0) AS vendido,
-              COALESCE(r.waste_qty,0) AS desperdicio,
-              COALESCE(r.notes,'') AS obs
-            FROM daily_records r
-            JOIN products p ON p.id = r.product_id
-            JOIN branches b ON b.id = r.branch_id
-            WHERE r.day BETWEEN :d1 AND :d2
-            ORDER BY r.day DESC, b.name, p.category NULLS LAST, p.name;
-        """), conn, params={"d1": d1, "d2": d2})
+    df = qdf("""
+    SELECT
+      m.dia,
+      f.nome AS filial,
+      COALESCE(c.nome,'(SEM)') AS categoria,
+      p.nome AS produto,
+      m.estoque,
+      m.produzido_real,
+      m.produzido_planejado,
+      m.enviado,
+      m.vendido,
+      m.desperdicio,
+      m.observacoes
+    FROM movimentos m
+    JOIN filiais f ON f.id=m.filial_id
+    JOIN produtos p ON p.id=m.produto_id
+    LEFT JOIN categorias c ON c.id=p.categoria_id
+    WHERE m.dia BETWEEN :d1 AND :d2
+    ORDER BY m.dia DESC, f.nome, c.nome NULLS LAST, p.nome;
+    """, {"d1": d1, "d2": d2})
 
     st.dataframe(df, use_container_width=True, hide_index=True)
 

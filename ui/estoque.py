@@ -1,52 +1,92 @@
-import pandas as pd
-from sqlalchemy import text
 from datetime import date
+import pandas as pd
 
-def render(st, engine, garantir_produto, get_branch_id):
-    st.header("Estoque (editável)")
+def render(st, qdf, qexec, garantir_produto, get_filial_id):
+    st.header("Estoque (edição rápida)")
 
-    branch = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
-    branch_id = get_branch_id(branch)
+    filiais = qdf("SELECT nome FROM filiais ORDER BY nome;")["nome"].tolist()
+    if not filiais:
+        st.error("Sem filiais.")
+        return
 
-    day = st.date_input("Data", value=date.today())
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        dia = st.date_input("Data", value=date.today())
+    with c2:
+        filial_nome = st.selectbox("Filial", filiais)
+        filial_id = get_filial_id(filial_nome)
 
-    with engine.begin() as conn:
-        df = pd.read_sql(text("""
-            SELECT
-              p.id AS product_id,
-              COALESCE(p.category,'') AS categoria,
-              p.name AS produto,
-              COALESCE(r.stock_qty,0) AS estoque
-            FROM products p
-            LEFT JOIN daily_records r
-              ON r.product_id = p.id
-             AND r.branch_id = :bid
-             AND r.day = :day
-            WHERE p.active = TRUE
-            ORDER BY p.category NULLS LAST, p.name;
-        """), conn, params={"bid": branch_id, "day": day})
+    df = qdf("""
+    SELECT
+      m.id,
+      COALESCE(c.nome,'(SEM)') AS categoria,
+      p.nome AS produto,
+      m.estoque,
+      m.produzido_real,
+      m.produzido_planejado,
+      m.enviado,
+      m.vendido,
+      m.desperdicio,
+      m.observacoes
+    FROM movimentos m
+    JOIN produtos p ON p.id=m.produto_id
+    LEFT JOIN categorias c ON c.id=p.categoria_id
+    WHERE m.dia=:dia AND m.filial_id=:fid
+    ORDER BY c.nome NULLS LAST, p.nome;
+    """, {"dia": dia, "fid": filial_id})
 
-    st.caption("Edite o estoque e clique em **Salvar estoque**. Isso corrige qualquer erro de contagem/importação.")
-    edited = st.data_editor(
-        df[["categoria","produto","estoque"]],
+    st.caption("Edite direto na tabela e clique em **Salvar alterações**. Para apagar, marque a coluna Excluir.")
+
+    if df.empty:
+        st.info("Nenhum lançamento nesse dia/filial.")
+        return
+
+    df["Excluir"] = False
+    edit = st.data_editor(
+        df,
         use_container_width=True,
         hide_index=True,
-        num_rows="fixed"
+        num_rows="fixed",
+        column_config={
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "categoria": st.column_config.TextColumn("Categoria", disabled=True),
+            "produto": st.column_config.TextColumn("Produto", disabled=True),
+        },
+        disabled=["categoria", "produto"]
     )
 
-    if st.button("Salvar estoque"):
-        with engine.begin() as conn:
-            for _, row in edited.iterrows():
-                produto = str(row["produto"]).strip().upper()
-                categoria = str(row["categoria"]).strip().upper() or None
-                pid = garantir_produto(conn, produto, categoria)
+    if st.button("Salvar alterações"):
+        # Atualiza
+        for _, row in edit.iterrows():
+            rid = int(row["id"])
+            if bool(row.get("Excluir", False)):
+                continue
 
-                conn.execute(text("""
-                    INSERT INTO daily_records(day, branch_id, product_id, stock_qty)
-                    VALUES (:day,:bid,:pid,:stock)
-                    ON CONFLICT (day, branch_id, product_id)
-                    DO UPDATE SET stock_qty = EXCLUDED.stock_qty;
-                """), {"day": day, "bid": branch_id, "pid": pid, "stock": float(row["estoque"] or 0)})
+            qexec("""
+            UPDATE movimentos
+               SET estoque=:e,
+                   produzido_real=:pr,
+                   produzido_planejado=:pp,
+                   enviado=:env,
+                   vendido=:ven,
+                   desperdicio=:des,
+                   observacoes=:obs
+             WHERE id=:id;
+            """, {
+                "id": rid,
+                "e": float(row["estoque"] or 0),
+                "pr": float(row["produzido_real"] or 0),
+                "pp": float(row["produzido_planejado"] or 0),
+                "env": float(row["enviado"] or 0),
+                "ven": float(row["vendido"] or 0),
+                "des": float(row["desperdicio"] or 0),
+                "obs": (str(row["observacoes"]).strip() if row["observacoes"] not in [None, "None"] else None),
+            })
 
-        st.success("Estoque salvo!")
+        # Exclui marcados
+        ids_del = [int(r["id"]) for _, r in edit.iterrows() if bool(r.get("Excluir", False))]
+        if ids_del:
+            qexec("DELETE FROM movimentos WHERE id = ANY(:ids);", {"ids": ids_del})
+
+        st.success("OK! Alterações salvas.")
         st.rerun()
