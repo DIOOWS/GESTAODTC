@@ -14,38 +14,38 @@ def render(st, qdf, qexec):
 
     df = qdf("""
         SELECT
-            p.id AS product_id,
+            p.id AS produto_id,
             p.categoria,
             p.produto,
             COALESCE(m.estoque,0) AS estoque
         FROM products p
         LEFT JOIN movimentos m
-          ON m.product_id = p.id AND m.filial_id=:f AND m.data=:d
+          ON m.produto_id = p.id AND m.filial_id=:f AND m.data=:d
         WHERE p.ativo = TRUE
         ORDER BY p.categoria, p.produto;
     """, {"f": filial_id, "d": data_ref})
 
-    st.caption("Edite o ESTOQUE e clique em Salvar alterações. (Isso grava na tabela movimentos)")
+    st.caption("Edite o ESTOQUE e clique em Salvar alterações. (Grava na tabela movimentos)")
 
     edited = st.data_editor(
         df,
         use_container_width=True,
         hide_index=True,
-        disabled=["product_id", "categoria", "produto"],
+        disabled=["produto_id", "categoria", "produto"],
         key="estoque_editor"
     )
 
     if st.button("Salvar alterações de estoque"):
         for _, r in edited.iterrows():
             qexec("""
-                INSERT INTO movimentos(data, filial_id, product_id, estoque)
+                INSERT INTO movimentos(data, filial_id, produto_id, estoque)
                 VALUES (:d, :f, :p, :e)
-                ON CONFLICT (data, filial_id, product_id)
+                ON CONFLICT (data, filial_id, produto_id)
                 DO UPDATE SET estoque=EXCLUDED.estoque;
             """, {
                 "d": data_ref,
                 "f": filial_id,
-                "p": int(r["product_id"]),
+                "p": int(r["produto_id"]),
                 "e": float(r["estoque"] or 0),
             })
         st.success("Estoque atualizado!")

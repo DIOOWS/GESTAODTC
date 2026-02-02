@@ -1,10 +1,8 @@
 from datetime import date
-import pandas as pd
 
 def render(st, qdf, qexec, garantir_produto, get_filial_id):
     st.header("Lançamentos")
 
-    # Filial e Data
     c1, c2 = st.columns([1, 1])
     with c1:
         filial = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
@@ -13,7 +11,6 @@ def render(st, qdf, qexec, garantir_produto, get_filial_id):
 
     filial_id = get_filial_id(filial)
 
-    # Lista produtos (tabela products)
     produtos_df = qdf("""
         SELECT id, categoria, produto
         FROM products
@@ -24,20 +21,18 @@ def render(st, qdf, qexec, garantir_produto, get_filial_id):
         st.info("Cadastre produtos primeiro em Produtos.")
         return
 
-    # Select de produto
     produtos_df["label"] = produtos_df["categoria"] + " | " + produtos_df["produto"]
     label = st.selectbox("Produto", produtos_df["label"].tolist())
     row = produtos_df.loc[produtos_df["label"] == label].iloc[0]
-    product_id = int(row["id"])
+    produto_id = int(row["id"])
 
     st.subheader("Quantidades (manual)")
 
-    # Buscar valores já existentes do dia/prod/filial
     existente = qdf("""
         SELECT estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes
         FROM movimentos
-        WHERE data=:d AND filial_id=:f AND product_id=:p;
-    """, {"d": data_ref, "f": filial_id, "p": product_id})
+        WHERE data=:d AND filial_id=:f AND produto_id=:p;
+    """, {"d": data_ref, "f": filial_id, "p": produto_id})
 
     def _get(col, default=0.0):
         if existente.empty:
@@ -57,9 +52,9 @@ def render(st, qdf, qexec, garantir_produto, get_filial_id):
 
     if st.button("Salvar lançamento"):
         qexec("""
-            INSERT INTO movimentos(data, filial_id, product_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes)
+            INSERT INTO movimentos(data, filial_id, produto_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes)
             VALUES (:d, :f, :p, :e, :pp, :pr, :v, :w, :o)
-            ON CONFLICT (data, filial_id, product_id)
+            ON CONFLICT (data, filial_id, produto_id)
             DO UPDATE SET
               estoque=EXCLUDED.estoque,
               produzido_planejado=EXCLUDED.produzido_planejado,
@@ -68,7 +63,7 @@ def render(st, qdf, qexec, garantir_produto, get_filial_id):
               desperdicio=EXCLUDED.desperdicio,
               observacoes=EXCLUDED.observacoes;
         """, {
-            "d": data_ref, "f": filial_id, "p": product_id,
+            "d": data_ref, "f": filial_id, "p": produto_id,
             "e": estoque, "pp": prod_plan, "pr": prod_real,
             "v": vendido, "w": desperd, "o": obs.strip() or None
         })
@@ -84,7 +79,7 @@ def render(st, qdf, qexec, garantir_produto, get_filial_id):
                m.vendido, m.desperdicio, m.observacoes
         FROM movimentos m
         JOIN filiais f ON f.id = m.filial_id
-        JOIN products p ON p.id = m.product_id
+        JOIN products p ON p.id = m.produto_id
         WHERE m.data=:d AND m.filial_id=:f
         ORDER BY p.categoria, p.produto;
     """, {"d": data_ref, "f": filial_id})

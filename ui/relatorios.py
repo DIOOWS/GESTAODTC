@@ -5,7 +5,7 @@ import io
 def render(st, qdf):
     st.header("Relatórios")
 
-    c1, c2, c3 = st.columns([1,1,1])
+    c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         d1 = st.date_input("De", value=date.today().replace(day=1))
     with c2:
@@ -34,7 +34,7 @@ def render(st, qdf):
             m.observacoes
         FROM movimentos m
         JOIN filiais f ON f.id = m.filial_id
-        JOIN products p ON p.id = m.product_id
+        JOIN products p ON p.id = m.produto_id
         WHERE m.data BETWEEN :d1 AND :d2
         {where_filial}
         ORDER BY m.data DESC, f.nome, p.categoria, p.produto;
@@ -42,7 +42,6 @@ def render(st, qdf):
 
     st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Export Excel
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Relatorio")
