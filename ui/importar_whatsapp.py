@@ -1,5 +1,7 @@
 from datetime import date
 from services.whatsapp_parser import parse_whatsapp
+from services.whatsapp_parser import parse_whatsapp_text
+
 
 def render(st, qdf, qexec, garantir_produto, get_filial_id):
     st.header("Importar WhatsApp (texto)")
