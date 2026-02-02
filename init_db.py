@@ -1,3 +1,8 @@
+from sqlalchemy import text
+
+from db import _rename_col_if_exists
+
+
 def init_db(engine):
     with engine.begin() as conn:
 
@@ -70,3 +75,10 @@ def init_db(engine):
         INSERT INTO filiais(nome) VALUES ('AUSTIN'), ('QUEIMADOS')
         ON CONFLICT DO NOTHING;
         """))
+
+        # movimentos: padronizar produto_id
+        _rename_col_if_exists(conn, "movimentos", "product_id", "produto_id")
+
+        # transferencias: padronizar produto_id (se existir)
+        _rename_col_if_exists(conn, "transferencias", "product_id", "produto_id")
+
