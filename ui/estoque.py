@@ -1,52 +1,63 @@
 from datetime import date
 
-def render(st, qdf, qexec):
-    st.header("Estoque (editar rápido)")
+def render(st, qdf, qexec, get_filial_id):
+    st.header("Estoque (edição rápida)")
 
-    c1, c2 = st.columns([1, 1])
+    c1, c2 = st.columns([1,1])
     with c1:
-        filial = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
+        dia = st.date_input("Data", value=date.today())
     with c2:
-        data_ref = st.date_input("Data", value=date.today())
-
-    # pegar id filial
-    filial_id = int(qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": filial}).iloc[0]["id"])
+        filial = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
+        filial_id = get_filial_id(filial)
 
     df = qdf("""
         SELECT
-            p.id AS produto_id,
-            p.categoria,
-            p.produto,
-            COALESCE(m.estoque,0) AS estoque
+          p.id AS produto_id,
+          p.categoria,
+          p.produto,
+          COALESCE(m.estoque,0) AS estoque,
+          COALESCE(m.produzido_planejado,0) AS produzido_planejado,
+          COALESCE(m.produzido_real,0) AS produzido_real,
+          COALESCE(m.vendido,0) AS vendido,
+          COALESCE(m.desperdicio,0) AS desperdicio
         FROM products p
         LEFT JOIN movimentos m
-          ON m.produto_id = p.id AND m.filial_id=:f AND m.data=:d
-        WHERE p.ativo = TRUE
+          ON m.produto_id=p.id AND m.filial_id=:f AND m.data=:d
+        WHERE p.ativo=TRUE
         ORDER BY p.categoria, p.produto;
-    """, {"f": filial_id, "d": data_ref})
+    """, {"f": filial_id, "d": dia})
 
-    st.caption("Edite o ESTOQUE e clique em Salvar alterações. (Grava na tabela movimentos)")
+    if df.empty:
+        st.info("Sem produtos cadastrados.")
+        return
 
-    edited = st.data_editor(
+    edit = st.data_editor(
         df,
         use_container_width=True,
         hide_index=True,
         disabled=["produto_id", "categoria", "produto"],
-        key="estoque_editor"
+        num_rows="fixed"
     )
 
-    if st.button("Salvar alterações de estoque"):
-        for _, r in edited.iterrows():
+    if st.button("Salvar alterações"):
+        for _, r in edit.iterrows():
             qexec("""
-                INSERT INTO movimentos(data, filial_id, produto_id, estoque)
-                VALUES (:d, :f, :p, :e)
+                INSERT INTO movimentos(data, filial_id, produto_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio)
+                VALUES (:data, :filial_id, :produto_id, :estoque, :pp, :pr, :vend, :desp)
                 ON CONFLICT (data, filial_id, produto_id)
-                DO UPDATE SET estoque=EXCLUDED.estoque;
+                DO UPDATE SET
+                  estoque=EXCLUDED.estoque,
+                  produzido_planejado=EXCLUDED.produzido_planejado,
+                  produzido_real=EXCLUDED.produzido_real,
+                  vendido=EXCLUDED.vendido,
+                  desperdicio=EXCLUDED.desperdicio;
             """, {
-                "d": data_ref,
-                "f": filial_id,
-                "p": int(r["produto_id"]),
-                "e": float(r["estoque"] or 0),
+                "data": dia, "filial_id": filial_id, "produto_id": int(r["produto_id"]),
+                "estoque": int(r["estoque"] or 0),
+                "pp": int(r["produzido_planejado"] or 0),
+                "pr": int(r["produzido_real"] or 0),
+                "vend": int(r["vendido"] or 0),
+                "desp": int(r["desperdicio"] or 0),
             })
-        st.success("Estoque atualizado!")
+        st.success("Salvo!")
         st.rerun()

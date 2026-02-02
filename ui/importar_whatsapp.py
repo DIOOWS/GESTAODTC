@@ -1,81 +1,55 @@
-# ui/importar_whatsapp.py
 from datetime import date
-import streamlit as st
-
 from services.whatsapp_parser import parse_whatsapp_text
 
-
 def render(st, qdf, qexec, garantir_produto, get_filial_id):
-    st.header("Importar WhatsApp (texto livre)")
+    st.header("Importar WhatsApp (texto colado)")
 
-    col1, col2 = st.columns([2, 2])
-    with col1:
-        filial_nome = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"], index=0)
-    with col2:
-        data_ref = st.date_input("Data", value=date.today())
+    st.caption("Cole o texto do WhatsApp. O sistema identifica CATEGORIAS e itens (NOME + NÚMERO) e salva em MAIÚSCULO.")
 
-    salvar_como = st.radio(
-        "Salvar como:",
-        ["Estoque (contagem)", "Produzido planejado"],
-        index=1,
-        horizontal=True,
-    )
+    c1, c2, c3 = st.columns([1,1,2])
+    with c1:
+        dia = st.date_input("Data", value=date.today())
+    with c2:
+        filial = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
+        filial_id = get_filial_id(filial)
+    with c3:
+        modo = st.selectbox("Esse texto representa:", ["ESTOQUE (contagem)", "PRODUÇÃO PLANEJADA (amanhã)"])
 
-    txt = st.text_area("Cole o texto aqui", height=220, placeholder="Cole aqui a mensagem do WhatsApp...")
+    texto = st.text_area("Cole aqui o texto", height=250)
 
-    if "itens_whats" not in st.session_state:
-        st.session_state["itens_whats"] = []
+    if st.button("Pré-visualizar"):
+        itens = parse_whatsapp_text(texto, categoria_default="GERAL")
+        st.write(f"Itens lidos: **{len(itens)}**")
+        for it in itens[:50]:
+            st.write(f"- {it.categoria} • {it.produto} = {it.quantidade}")
+        if len(itens) > 50:
+            st.info("Mostrando só os 50 primeiros.")
 
-    if st.button("Processar"):
-        itens = parse_whatsapp_text(txt)
+    if st.button("Salvar no banco"):
+        itens = parse_whatsapp_text(texto, categoria_default="GERAL")
+        if not itens:
+            st.warning("Nada foi reconhecido. Verifique se as linhas têm número (ex: LIMÃO 2).")
+            return
 
-        st.session_state["itens_whats"] = itens
-        st.success(f"Itens detectados: {len(itens)}")
+        for it in itens:
+            pid = garantir_produto(it.categoria, it.produto)
 
-    itens = st.session_state.get("itens_whats", [])
+            if modo.startswith("ESTOQUE"):
+                campo = "estoque"
+            else:
+                campo = "produzido_planejado"
 
-    if itens:
-        st.subheader("Prévia")
-        # mostra uma listinha
-        for it in itens[:200]:
-            st.write(f"- {it['categoria']} | {it['produto']} = {it['quantidade']}")
+            qexec(f"""
+                INSERT INTO movimentos(data, filial_id, produto_id, {campo})
+                VALUES (:data, :filial_id, :produto_id, :qtd)
+                ON CONFLICT (data, filial_id, produto_id)
+                DO UPDATE SET {campo}=EXCLUDED.{campo};
+            """, {
+                "data": dia,
+                "filial_id": filial_id,
+                "produto_id": pid,
+                "qtd": int(it.quantidade),
+            })
 
-        if st.button("Salvar no banco"):
-            try:
-                filial_id = get_filial_id(filial_nome)
-
-                # decide coluna a gravar
-                col_alvo = "estoque" if salvar_como.startswith("Estoque") else "produzido_planejado"
-
-                salvos = 0
-                for it in itens:
-                    categoria = it.get("categoria", "").strip()
-                    produto = it.get("produto", "").strip()
-                    quantidade = float(it.get("quantidade", 0) or 0)
-
-                    if not categoria or not produto:
-                        continue
-
-                    product_id = garantir_produto(categoria, produto)
-
-                    # UPSERT em movimentos
-                    qexec(f"""
-                        INSERT INTO movimentos(data, filial_id, product_id, {col_alvo})
-                        VALUES (:data, :filial_id, :product_id, :qtd)
-                        ON CONFLICT (data, filial_id, product_id)
-                        DO UPDATE SET {col_alvo} = EXCLUDED.{col_alvo};
-                    """, {
-                        "data": data_ref,
-                        "filial_id": filial_id,
-                        "product_id": product_id,
-                        "qtd": quantidade,
-                    })
-
-                    salvos += 1
-
-                st.success(f"✅ Salvo! Registros processados: {salvos}")
-            except Exception as e:
-                st.error(f"Erro ao salvar: {e}")
-                raise
-    else:
-        st.info("Cole o texto e clique em **Processar**.")
+        st.success("Importação concluída!")
+        st.rerun()

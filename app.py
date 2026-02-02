@@ -4,7 +4,6 @@ import pandas as pd
 from sqlalchemy import text
 
 from db import get_engine, init_db
-
 from ui import painel, produtos, lancamentos, estoque, relatorios, importar_excel, importar_whatsapp
 
 st.set_page_config(page_title="Padaria | Controle", layout="wide")
@@ -47,25 +46,22 @@ def qexec(sql, params=None):
     with engine.begin() as conn:
         conn.execute(text(sql), params or {})
 
-# Helpers: filiais e produto
 def get_filial_id(nome: str) -> int:
-    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome.strip().upper()})
+    n = (nome or "").strip().upper()
+    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": n})
     if not df.empty:
         return int(df.iloc[0]["id"])
-    qexec("INSERT INTO filiais(nome) VALUES (:n) ON CONFLICT (nome) DO NOTHING;", {"n": nome.strip().upper()})
-    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome.strip().upper()})
+    qexec("INSERT INTO filiais(nome) VALUES (:n) ON CONFLICT (nome) DO NOTHING;", {"n": n})
+    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": n})
     return int(df.iloc[0]["id"])
 
 def garantir_produto(categoria: str, produto_nome: str) -> int:
-    categoria = (categoria or "").strip().upper()
-    produto_nome = (produto_nome or "").strip().upper()
-    if not categoria or not produto_nome:
+    c = (categoria or "").strip().upper()
+    p = (produto_nome or "").strip().upper()
+    if not c or not p:
         raise ValueError("categoria e produto são obrigatórios")
 
-    df = qdf(
-        "SELECT id FROM products WHERE categoria=:c AND produto=:p;",
-        {"c": categoria, "p": produto_nome},
-    )
+    df = qdf("SELECT id FROM products WHERE categoria=:c AND produto=:p;", {"c": c, "p": p})
     if not df.empty:
         return int(df.iloc[0]["id"])
 
@@ -73,12 +69,9 @@ def garantir_produto(categoria: str, produto_nome: str) -> int:
         INSERT INTO products(categoria, produto)
         VALUES (:c, :p)
         ON CONFLICT (categoria, produto) DO NOTHING;
-    """, {"c": categoria, "p": produto_nome})
+    """, {"c": c, "p": p})
 
-    df = qdf(
-        "SELECT id FROM products WHERE categoria=:c AND produto=:p;",
-        {"c": categoria, "p": produto_nome},
-    )
+    df = qdf("SELECT id FROM products WHERE categoria=:c AND produto=:p;", {"c": c, "p": p})
     return int(df.iloc[0]["id"])
 
 # --- Sidebar ---
@@ -88,7 +81,6 @@ page = st.sidebar.radio(
     ["Painel", "Produtos", "Lançamentos", "Estoque", "Relatórios", "Importar Excel", "Importar WhatsApp"],
 )
 
-# --- Router ---
 if page == "Painel":
     painel.render(st, qdf)
 
@@ -99,13 +91,13 @@ elif page == "Lançamentos":
     lancamentos.render(st, qdf, qexec, garantir_produto, get_filial_id)
 
 elif page == "Estoque":
-    estoque.render(st, qdf, qexec)
+    estoque.render(st, qdf, qexec, get_filial_id)
 
 elif page == "Relatórios":
     relatorios.render(st, qdf)
 
 elif page == "Importar Excel":
-    importar_excel.render(st, qdf, qexec, garantir_produto)
+    importar_excel.render(st, qdf, qexec)
 
 elif page == "Importar WhatsApp":
     importar_whatsapp.render(st, qdf, qexec, garantir_produto, get_filial_id)

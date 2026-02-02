@@ -1,7 +1,1 @@
-from . import painel
-from . import produtos
-from . import lancamentos
-from . import estoque
-from . import relatorios
-from . import importar_excel
-from . import importar_whatsapp
+from . import painel, produtos, lancamentos, estoque, relatorios, importar_excel, importar_whatsapp

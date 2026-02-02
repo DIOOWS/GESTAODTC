@@ -1,9 +1,7 @@
-import pandas as pd
-
 def render(st, qdf, qexec):
     st.header("Produtos")
 
-    col1, col2 = st.columns([2, 1])
+    col1, col2 = st.columns([2,1])
 
     with col1:
         df = qdf("""
@@ -14,23 +12,26 @@ def render(st, qdf, qexec):
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     with col2:
-        st.subheader("Adicionar produto")
+        st.subheader("Adicionar")
         categoria = st.text_input("Categoria (ex: BOLO RETANGULAR)")
-        produto = st.text_input("Produto (ex: FERRERO ROCHER)")
-        ativo = st.checkbox("Ativo", value=True)
-
-        if st.button("Salvar"):
-            if not categoria.strip() or not produto.strip():
-                st.warning("Categoria e Produto são obrigatórios.")
-            else:
+        produto = st.text_input("Produto/Sabor (ex: FERRERO ROCHER)")
+        if st.button("Salvar produto"):
+            if categoria.strip() and produto.strip():
                 qexec("""
-                    INSERT INTO products(categoria, produto, ativo)
-                    VALUES (:c, :p, :a)
-                    ON CONFLICT (categoria, produto) DO UPDATE SET ativo=EXCLUDED.ativo;
-                """, {
-                    "c": categoria.strip().upper(),
-                    "p": produto.strip().upper(),
-                    "a": bool(ativo),
-                })
+                    INSERT INTO products(categoria, produto)
+                    VALUES (:c, :p)
+                    ON CONFLICT (categoria, produto) DO NOTHING;
+                """, {"c": categoria.strip().upper(), "p": produto.strip().upper()})
                 st.success("Salvo!")
+                st.rerun()
+            else:
+                st.warning("Categoria e Produto são obrigatórios.")
+
+        st.divider()
+        st.subheader("Excluir (opcional)")
+        pid = st.number_input("ID do produto para excluir", min_value=0, step=1)
+        if st.button("Excluir produto"):
+            if pid > 0:
+                qexec("DELETE FROM products WHERE id=:id;", {"id": int(pid)})
+                st.success("Excluído.")
                 st.rerun()
