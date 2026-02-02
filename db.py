@@ -17,13 +17,11 @@ def _col_exists(conn, table, col):
     """), {"t": table, "c": col}).fetchone()
     return r is not None
 
-def _rename_col_if_exists(conn, table, old, new):
-    if _col_exists(conn, table, old) and not _col_exists(conn, table, new):
-        conn.execute(text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";'))
-
 def init_db(engine):
     with engine.begin() as conn:
-        # --- Tabelas base (não dependem de outras) ---
+        # ----------------------------
+        # 1) TABELAS BASE
+        # ----------------------------
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS products (
           id SERIAL PRIMARY KEY,
@@ -45,18 +43,18 @@ def init_db(engine):
         );
         """))
 
-        # seed filiais
+        # Seed filiais padrão
         conn.execute(text("INSERT INTO filiais(nome) VALUES ('AUSTIN') ON CONFLICT (nome) DO NOTHING;"))
         conn.execute(text("INSERT INTO filiais(nome) VALUES ('QUEIMADOS') ON CONFLICT (nome) DO NOTHING;"))
 
-        # --- Movimentos ---
+        # Movimentos (cria se não existir)
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS movimentos (
           id SERIAL PRIMARY KEY,
           data DATE NOT NULL,
           filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
 
-          -- coluna "nova" (padrão)
+          -- padrão novo:
           product_id INT REFERENCES products(id) ON DELETE CASCADE,
 
           estoque NUMERIC(12,2) DEFAULT 0,
@@ -69,7 +67,7 @@ def init_db(engine):
         );
         """))
 
-        # --- Transferências (se você usar depois) ---
+        # Transferências (se existir/usar depois)
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS transferencias (
           id SERIAL PRIMARY KEY,
@@ -77,7 +75,7 @@ def init_db(engine):
           de_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
           para_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
 
-          -- coluna "nova" (padrão)
+          -- padrão novo:
           product_id INT REFERENCES products(id) ON DELETE CASCADE,
 
           quantidade NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -86,42 +84,74 @@ def init_db(engine):
         """))
 
         # ----------------------------
-        # MIGRAÇÕES (auto-corrigir banco antigo)
+        # 2) MIGRAÇÕES: padronizar data
+        # ----------------------------
+        # movimentos: dia/day -> data (se existir)
+        if _col_exists(conn, "movimentos", "dia") and not _col_exists(conn, "movimentos", "data"):
+            conn.execute(text('ALTER TABLE movimentos RENAME COLUMN dia TO data;'))
+        if _col_exists(conn, "movimentos", "day") and not _col_exists(conn, "movimentos", "data"):
+            conn.execute(text('ALTER TABLE movimentos RENAME COLUMN day TO data;'))
+
+        # transferencias: dia/day -> data (se existir)
+        if _col_exists(conn, "transferencias", "dia") and not _col_exists(conn, "transferencias", "data"):
+            conn.execute(text('ALTER TABLE transferencias RENAME COLUMN dia TO data;'))
+        if _col_exists(conn, "transferencias", "day") and not _col_exists(conn, "transferencias", "data"):
+            conn.execute(text('ALTER TABLE transferencias RENAME COLUMN day TO data;'))
+
+        # ----------------------------
+        # 3) MIGRAÇÃO FORÇADA: produto_id -> product_id
+        # (resolve seu erro atual)
         # ----------------------------
 
-        # padronizar data (caso exista dia/day)
-        _rename_col_if_exists(conn, "movimentos", "day", "data")
-        _rename_col_if_exists(conn, "movimentos", "dia", "data")
-        _rename_col_if_exists(conn, "transferencias", "day", "data")
-        _rename_col_if_exists(conn, "transferencias", "dia", "data")
-
-        # PADRONIZAR product_id (isso resolve seu erro atual)
-        _rename_col_if_exists(conn, "movimentos", "produto_id", "product_id")
-        _rename_col_if_exists(conn, "transferencias", "produto_id", "product_id")
-
-        # garantir NOT NULL / FK em movimentos.product_id se existir a coluna
-        # (não força NOT NULL para não quebrar registros antigos vazios)
-        if _col_exists(conn, "movimentos", "product_id"):
+        # MOVIMENTOS
+        if _col_exists(conn, "movimentos", "produto_id") and not _col_exists(conn, "movimentos", "product_id"):
+            # cria product_id
+            conn.execute(text("ALTER TABLE movimentos ADD COLUMN product_id INT;"))
+            # copia valores
+            conn.execute(text("UPDATE movimentos SET product_id = produto_id WHERE product_id IS NULL;"))
+            # cria FK (se ainda não existir)
             conn.execute(text("""
-                DO $$
-                BEGIN
-                  IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage kcu
-                      ON tc.constraint_name = kcu.constraint_name
-                    WHERE tc.table_name='movimentos'
-                      AND tc.constraint_type='FOREIGN KEY'
-                      AND kcu.column_name='product_id'
-                  ) THEN
-                    ALTER TABLE movimentos
-                      ADD CONSTRAINT fk_movimentos_product
-                      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE;
-                  END IF;
-                END $$;
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE table_schema='public'
+                  AND table_name='movimentos'
+                  AND constraint_name='fk_movimentos_product_id'
+              ) THEN
+                ALTER TABLE movimentos
+                  ADD CONSTRAINT fk_movimentos_product_id
+                  FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE;
+              END IF;
+            END $$;
             """))
+            # remove coluna antiga
+            conn.execute(text("ALTER TABLE movimentos DROP COLUMN produto_id;"))
 
-        # índice/unique para UPSERT funcionar
-        # (se já existir com outro nome, não tem problema)
+        # TRANSFERENCIAS
+        if _col_exists(conn, "transferencias", "produto_id") and not _col_exists(conn, "transferencias", "product_id"):
+            conn.execute(text("ALTER TABLE transferencias ADD COLUMN product_id INT;"))
+            conn.execute(text("UPDATE transferencias SET product_id = produto_id WHERE product_id IS NULL;"))
+            conn.execute(text("""
+            DO $$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE table_schema='public'
+                  AND table_name='transferencias'
+                  AND constraint_name='fk_transferencias_product_id'
+              ) THEN
+                ALTER TABLE transferencias
+                  ADD CONSTRAINT fk_transferencias_product_id
+                  FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE;
+              END IF;
+            END $$;
+            """))
+            conn.execute(text("ALTER TABLE transferencias DROP COLUMN produto_id;"))
+
+        # ----------------------------
+        # 4) GARANTIR ÍNDICE ÚNICO pro UPSERT funcionar
+        # ----------------------------
         conn.execute(text("""
         DO $$
         BEGIN
