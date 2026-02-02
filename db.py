@@ -5,7 +5,6 @@ def get_engine():
     url = os.getenv("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL não definida (configure no Render).")
-    # Render às vezes entrega postgres://
     url = url.replace("postgres://", "postgresql://", 1)
     return create_engine(url, pool_pre_ping=True)
 
@@ -18,22 +17,13 @@ def _col_exists(conn, table, col):
     """), {"t": table, "c": col}).fetchone()
     return r is not None
 
-def _table_exists(conn, table):
-    r = conn.execute(text("""
-        SELECT 1
-        FROM information_schema.tables
-        WHERE table_schema='public' AND table_name=:t
-        LIMIT 1;
-    """), {"t": table}).fetchone()
-    return r is not None
-
 def _rename_col_if_exists(conn, table, old, new):
-    if _table_exists(conn, table) and _col_exists(conn, table, old) and not _col_exists(conn, table, new):
+    if _col_exists(conn, table, old) and not _col_exists(conn, table, new):
         conn.execute(text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";'))
 
 def init_db(engine):
     with engine.begin() as conn:
-        # --- Produtos ---
+        # --- Tabelas base (não dependem de outras) ---
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS products (
           id SERIAL PRIMARY KEY,
@@ -43,13 +33,11 @@ def init_db(engine):
         );
         """))
 
-        # índice único pra evitar duplicar produto na mesma categoria
         conn.execute(text("""
         CREATE UNIQUE INDEX IF NOT EXISTS ux_products_cat_prod
         ON products (categoria, produto);
         """))
 
-        # --- Filiais ---
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS filiais (
           id SERIAL PRIMARY KEY,
@@ -57,36 +45,94 @@ def init_db(engine):
         );
         """))
 
+        # seed filiais
+        conn.execute(text("INSERT INTO filiais(nome) VALUES ('AUSTIN') ON CONFLICT (nome) DO NOTHING;"))
+        conn.execute(text("INSERT INTO filiais(nome) VALUES ('QUEIMADOS') ON CONFLICT (nome) DO NOTHING;"))
+
         # --- Movimentos ---
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS movimentos (
           id SERIAL PRIMARY KEY,
           data DATE NOT NULL,
           filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
-          product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+
+          -- coluna "nova" (padrão)
+          product_id INT REFERENCES products(id) ON DELETE CASCADE,
 
           estoque NUMERIC(12,2) DEFAULT 0,
           produzido_planejado NUMERIC(12,2) DEFAULT 0,
           produzido_real NUMERIC(12,2) DEFAULT 0,
-          enviado NUMERIC(12,2) DEFAULT 0,
           vendido NUMERIC(12,2) DEFAULT 0,
           desperdicio NUMERIC(12,2) DEFAULT 0,
 
-          observacoes TEXT,
-          UNIQUE (data, filial_id, product_id)
+          observacoes TEXT
         );
         """))
 
-        # Seed filiais padrão
+        # --- Transferências (se você usar depois) ---
         conn.execute(text("""
-        INSERT INTO filiais(nome) VALUES ('AUSTIN')
-        ON CONFLICT (nome) DO NOTHING;
-        """))
-        conn.execute(text("""
-        INSERT INTO filiais(nome) VALUES ('QUEIMADOS')
-        ON CONFLICT (nome) DO NOTHING;
+        CREATE TABLE IF NOT EXISTS transferencias (
+          id SERIAL PRIMARY KEY,
+          data DATE NOT NULL,
+          de_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
+          para_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
+
+          -- coluna "nova" (padrão)
+          product_id INT REFERENCES products(id) ON DELETE CASCADE,
+
+          quantidade NUMERIC(12,2) NOT NULL DEFAULT 0,
+          observacoes TEXT
+        );
         """))
 
-        # --- Migração: padronizar coluna data (se existir 'day' ou 'dia') ---
+        # ----------------------------
+        # MIGRAÇÕES (auto-corrigir banco antigo)
+        # ----------------------------
+
+        # padronizar data (caso exista dia/day)
         _rename_col_if_exists(conn, "movimentos", "day", "data")
         _rename_col_if_exists(conn, "movimentos", "dia", "data")
+        _rename_col_if_exists(conn, "transferencias", "day", "data")
+        _rename_col_if_exists(conn, "transferencias", "dia", "data")
+
+        # PADRONIZAR product_id (isso resolve seu erro atual)
+        _rename_col_if_exists(conn, "movimentos", "produto_id", "product_id")
+        _rename_col_if_exists(conn, "transferencias", "produto_id", "product_id")
+
+        # garantir NOT NULL / FK em movimentos.product_id se existir a coluna
+        # (não força NOT NULL para não quebrar registros antigos vazios)
+        if _col_exists(conn, "movimentos", "product_id"):
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name
+                    WHERE tc.table_name='movimentos'
+                      AND tc.constraint_type='FOREIGN KEY'
+                      AND kcu.column_name='product_id'
+                  ) THEN
+                    ALTER TABLE movimentos
+                      ADD CONSTRAINT fk_movimentos_product
+                      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE;
+                  END IF;
+                END $$;
+            """))
+
+        # índice/unique para UPSERT funcionar
+        # (se já existir com outro nome, não tem problema)
+        conn.execute(text("""
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_indexes
+            WHERE schemaname='public'
+              AND indexname='ux_movimentos_data_filial_product'
+          ) THEN
+            CREATE UNIQUE INDEX ux_movimentos_data_filial_product
+              ON movimentos (data, filial_id, product_id);
+          END IF;
+        END $$;
+        """))
