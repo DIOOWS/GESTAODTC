@@ -45,20 +45,28 @@ def _sum_range(qdf, d1, d2):
         WHERE data BETWEEN :d1 AND :d2;
     """, {"d1": d1, "d2": d2})
 
+    enviado = _one(qdf, """
+        SELECT COALESCE(SUM(enviado),0) AS enviado
+        FROM movimentos
+        WHERE data BETWEEN :d1 AND :d2;
+    """, {"d1": d1, "d2": d2})
+
     return {
         "vendido": vendido,
         "produzido_real": produzido_real,
         "desperdicio": desperdicio,
         "estoque_soma": estoque_soma,
+        "enviado": enviado,
     }
 
 def _bloco(st, titulo, k):
     st.subheader(titulo)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Vendas", int(round(_to_num(k["vendido"]))))
     c2.metric("Produzido (real)", int(round(_to_num(k["produzido_real"]))))
     c3.metric("Desperdício", int(round(_to_num(k["desperdicio"]))))
     c4.metric("Estoque (soma)", int(round(_to_num(k["estoque_soma"]))))
+    c5.metric("Enviado", int(round(_to_num(k["enviado"]))))
 
 def render(st, qdf):
     st.header("Painel")
