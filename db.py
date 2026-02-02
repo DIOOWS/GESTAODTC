@@ -2,97 +2,100 @@ import os
 from sqlalchemy import create_engine, text
 
 def get_engine():
-    url = os.getenv("DATABASE_URL", "").strip()
+    url = os.getenv("DATABASE_URL")
     if not url:
-        raise RuntimeError("DATABASE_URL não definida (adicione no Render / ambiente).")
-
-    # Render às vezes usa postgres://
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
-
-    # Se for URL do Render sem sslmode, adiciona (bom pra produção)
-    if "sslmode=" not in url:
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}sslmode=require"
-
+        raise RuntimeError("DATABASE_URL não definida (configure no Render).")
+    # Render às vezes entrega postgres://
+    url = url.replace("postgres://", "postgresql://", 1)
     return create_engine(url, pool_pre_ping=True)
+
+def _col_exists(conn, table, col):
+    r = conn.execute(text("""
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=:t AND column_name=:c
+        LIMIT 1;
+    """), {"t": table, "c": col}).fetchone()
+    return r is not None
+
+def _rename_col_if_exists(conn, table, old, new):
+    if _col_exists(conn, table, old) and not _col_exists(conn, table, new):
+        conn.execute(text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";'))
 
 def init_db(engine):
     with engine.begin() as conn:
-        # Filiais fixas (AUSTIN e QUEIMADOS)
+        # --- Tabelas principais ---
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS products (
+          id SERIAL PRIMARY KEY,
+          categoria TEXT NOT NULL,
+          produto TEXT NOT NULL,
+          ativo BOOLEAN NOT NULL DEFAULT TRUE
+        );
+        """))
+
+        # índice único pra evitar duplicar produto na mesma categoria
+        # (Postgres não aceita COALESCE em UNIQUE direto, então fazemos índice UNIQUE por expressão)
+        conn.execute(text("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_products_cat_prod
+        ON products (categoria, produto);
+        """))
+
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS filiais (
-            id SERIAL PRIMARY KEY,
-            nome TEXT NOT NULL UNIQUE
+          id SERIAL PRIMARY KEY,
+          nome TEXT NOT NULL UNIQUE
         );
         """))
 
-        # Categorias (ex: BOLO RETANGULAR, BOLOS CASEIROS, ASSADOS, etc.)
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS categorias (
-            id SERIAL PRIMARY KEY,
-            nome TEXT NOT NULL UNIQUE
-        );
-        """))
-
-        # Produtos (produto = nome/sabor; categoria separada)
-        # CORREÇÃO: nada de COALESCE dentro do UNIQUE
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS produtos (
-            id SERIAL PRIMARY KEY,
-            nome TEXT NOT NULL,
-            categoria_id INTEGER REFERENCES categorias(id) ON DELETE SET NULL,
-            ativo BOOLEAN NOT NULL DEFAULT TRUE,
-            UNIQUE (categoria_id, nome)
-        );
-        """))
-
-        # Movimentação diária por filial e produto
+        # Movimentos: tudo que altera números (estoque, produção, vendas etc.)
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS movimentos (
-            id SERIAL PRIMARY KEY,
-            dia DATE NOT NULL,
-            filial_id INTEGER NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
-            produto_id INTEGER NOT NULL REFERENCES produtos(id) ON DELETE CASCADE,
+          id SERIAL PRIMARY KEY,
+          data DATE NOT NULL,
+          filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
+          product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
 
-            estoque NUMERIC(12,2) DEFAULT 0,
-            produzido_real NUMERIC(12,2) DEFAULT 0,
-            produzido_planejado NUMERIC(12,2) DEFAULT 0,
-            enviado NUMERIC(12,2) DEFAULT 0,
-            vendido NUMERIC(12,2) DEFAULT 0,
-            desperdicio NUMERIC(12,2) DEFAULT 0,
-            observacoes TEXT,
+          estoque NUMERIC(12,2) DEFAULT 0,
+          produzido_planejado NUMERIC(12,2) DEFAULT 0,
+          produzido_real NUMERIC(12,2) DEFAULT 0,
+          vendido NUMERIC(12,2) DEFAULT 0,
+          desperdicio NUMERIC(12,2) DEFAULT 0,
 
-            UNIQUE (dia, filial_id, produto_id)
+          observacoes TEXT,
+          UNIQUE (data, filial_id, product_id)
         );
         """))
 
-        # Transferências entre filiais (AUSTIN -> QUEIMADOS e vice-versa)
+        # Transferências: de uma filial para outra
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS transferencias (
-            id SERIAL PRIMARY KEY,
-            dia DATE NOT NULL,
-            produto_id INTEGER NOT NULL REFERENCES produtos(id) ON DELETE CASCADE,
-            de_filial_id INTEGER NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
-            para_filial_id INTEGER NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
-            quantidade NUMERIC(12,2) NOT NULL DEFAULT 0,
-            observacoes TEXT
+          id SERIAL PRIMARY KEY,
+          data DATE NOT NULL,
+          de_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
+          para_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
+          product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          quantidade NUMERIC(12,2) NOT NULL DEFAULT 0,
+          observacoes TEXT
         );
         """))
 
-        # Seed de filiais se não existir
+        # Seed filiais padrão
         conn.execute(text("""
-        INSERT INTO filiais(nome) VALUES ('AUSTIN') ON CONFLICT (nome) DO NOTHING;
+        INSERT INTO filiais(nome) VALUES ('AUSTIN')
+        ON CONFLICT (nome) DO NOTHING;
         """))
         conn.execute(text("""
-        INSERT INTO filiais(nome) VALUES ('QUEIMADOS') ON CONFLICT (nome) DO NOTHING;
+        INSERT INTO filiais(nome) VALUES ('QUEIMADOS')
+        ON CONFLICT (nome) DO NOTHING;
         """))
 
-def reset_db(engine):
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS transferencias;"))
-        conn.execute(text("DROP TABLE IF EXISTS movimentos;"))
-        conn.execute(text("DROP TABLE IF EXISTS produtos;"))
-        conn.execute(text("DROP TABLE IF EXISTS categorias;"))
-        conn.execute(text("DROP TABLE IF EXISTS filiais;"))
-    init_db(engine)
+        # --- Migração: padronizar coluna data ---
+        # movimentos
+        _rename_col_if_exists(conn, "movimentos", "day", "data")
+        _rename_col_if_exists(conn, "movimentos", "dia", "data")
+        # transferencias
+        _rename_col_if_exists(conn, "transferencias", "day", "data")
+        _rename_col_if_exists(conn, "transferencias", "dia", "data")
+
+        # (Se tiver outras tabelas, você me diz e eu incluo aqui.)
