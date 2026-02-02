@@ -1,8 +1,11 @@
 import os
 import streamlit as st
+import pandas as pd
+from sqlalchemy import text
+
 from db import get_engine, init_db
 
-from ui import painel, produtos, lancamentos, relatorios, importar_excel, importar_whatsapp, estoque
+from ui import painel, produtos, lancamentos, estoque, relatorios, importar_excel, importar_whatsapp
 
 st.set_page_config(page_title="Padaria | Controle", layout="wide")
 
@@ -25,8 +28,8 @@ div[data-testid="stDataFrame"] { background: var(--panel); border-radius: 12px; 
 </style>
 """, unsafe_allow_html=True)
 
-# --- Login simples (opcional) ---
-APP_PASSWORD = os.getenv("APP_PASSWORD", "").strip()
+# --- Login simples ---
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 if APP_PASSWORD:
     pw = st.sidebar.text_input("Senha", type="password")
     if pw != APP_PASSWORD:
@@ -36,10 +39,6 @@ if APP_PASSWORD:
 engine = get_engine()
 init_db(engine)
 
-# Helpers SQL
-import pandas as pd
-from sqlalchemy import text
-
 def qdf(sql, params=None):
     with engine.begin() as conn:
         return pd.read_sql(text(sql), conn, params=params or {})
@@ -48,55 +47,59 @@ def qexec(sql, params=None):
     with engine.begin() as conn:
         conn.execute(text(sql), params or {})
 
+# Helpers: filiais e produto
 def get_filial_id(nome: str) -> int:
-    df = qdf("SELECT id FROM filiais WHERE nome=:n", {"n": nome})
-    return int(df["id"].iloc[0])
+    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome.strip().upper()})
+    if not df.empty:
+        return int(df.iloc[0]["id"])
+    qexec("INSERT INTO filiais(nome) VALUES (:n) ON CONFLICT (nome) DO NOTHING;", {"n": nome.strip().upper()})
+    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome.strip().upper()})
+    return int(df.iloc[0]["id"])
 
-def garantir_categoria(nome_cat: str):
-    nome_cat = (nome_cat or "").strip().upper()
-    if not nome_cat:
-        return None
-    qexec("INSERT INTO categorias(nome) VALUES (:n) ON CONFLICT (nome) DO NOTHING;", {"n": nome_cat})
-    df = qdf("SELECT id FROM categorias WHERE nome=:n", {"n": nome_cat})
-    return int(df["id"].iloc[0])
+def garantir_produto(categoria: str, produto_nome: str) -> int:
+    categoria = (categoria or "").strip().upper()
+    produto_nome = (produto_nome or "").strip().upper()
+    if not categoria or not produto_nome:
+        raise ValueError("categoria e produto são obrigatórios")
 
-def garantir_produto(categoria: str, produto: str) -> int:
-    cat_id = garantir_categoria(categoria)
-    nome = (produto or "").strip().upper()
-    if not nome:
-        raise ValueError("Produto vazio")
+    df = qdf(
+        "SELECT id FROM products WHERE categoria=:c AND produto=:p;",
+        {"c": categoria, "p": produto_nome},
+    )
+    if not df.empty:
+        return int(df.iloc[0]["id"])
 
     qexec("""
-        INSERT INTO produtos(nome, categoria_id)
-        VALUES (:nome, :cat)
-        ON CONFLICT (categoria_id, nome) DO NOTHING;
-    """, {"nome": nome, "cat": cat_id})
+        INSERT INTO products(categoria, produto)
+        VALUES (:c, :p)
+        ON CONFLICT (categoria, produto) DO NOTHING;
+    """, {"c": categoria, "p": produto_nome})
 
-    df = qdf("SELECT id FROM produtos WHERE nome=:nome AND categoria_id IS NOT DISTINCT FROM :cat",
-             {"nome": nome, "cat": cat_id})
-    return int(df["id"].iloc[0])
+    df = qdf(
+        "SELECT id FROM products WHERE categoria=:c AND produto=:p;",
+        {"c": categoria, "p": produto_nome},
+    )
+    return int(df.iloc[0]["id"])
 
 # --- Sidebar ---
 st.sidebar.title("📦 Padaria")
 page = st.sidebar.radio(
     "Menu",
-    ["Painel", "Produtos", "Lançamentos", "Transferências", "Estoque", "Relatórios", "Importar Excel", "Importar WhatsApp"]
+    ["Painel", "Produtos", "Lançamentos", "Estoque", "Relatórios", "Importar Excel", "Importar WhatsApp"],
 )
 
+# --- Router ---
 if page == "Painel":
     painel.render(st, qdf)
 
 elif page == "Produtos":
-    produtos.render(st, qdf, qexec, garantir_produto)
+    produtos.render(st, qdf, qexec)
 
 elif page == "Lançamentos":
     lancamentos.render(st, qdf, qexec, garantir_produto, get_filial_id)
 
-elif page == "Transferências":
-    lancamentos.render_transferencias(st, qdf, qexec, garantir_produto, get_filial_id)
-
 elif page == "Estoque":
-    estoque.render(st, qdf, qexec, garantir_produto, get_filial_id)
+    estoque.render(st, qdf, qexec)
 
 elif page == "Relatórios":
     relatorios.render(st, qdf)
