@@ -49,3 +49,7 @@ def import_produtos_from_excel(file, categoria_default="GERAL"):
             seen.add(k)
             out.append(it)
     return out
+
+
+def import_products_from_excel():
+    return None

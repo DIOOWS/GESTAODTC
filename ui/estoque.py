@@ -1,27 +1,27 @@
 from datetime import date
 import pandas as pd
 
-def render(st, qdf, qexec):
+
+def render(st, qdf, qexec, get_filial_id):
     st.header("Estoque")
 
-    col1, col2 = st.columns(2)
-    filial = col1.selectbox("Filial", ["AUSTIN", "QUEIMADOS"], index=0)
-    d = col2.date_input("Data", value=date.today())
+    c1, c2 = st.columns(2)
+    filial = c1.selectbox("Filial", ["AUSTIN", "QUEIMADOS"], index=0)
+    d = c2.date_input("Data", value=date.today())
 
-    # pega filial_id
-    df_f = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": filial.strip().upper()})
-    if df_f.empty:
-        st.error("Filial não encontrada no banco.")
-        return
-    filial_id = int(df_f.iloc[0]["id"])
+    filial_id = get_filial_id(filial)
 
-    # lista estoque do dia por filial
-    df = qdf("""
+    df = qdf(
+        """
         SELECT
-          p.id AS product_id,
+          p.id AS produto_id,
           p.categoria,
           p.produto,
-          COALESCE(m.estoque, 0) AS estoque
+          COALESCE(m.estoque,0) AS estoque,
+          COALESCE(m.produzido_planejado,0) AS produzido_planejado,
+          COALESCE(m.produzido_real,0) AS produzido_real,
+          COALESCE(m.vendido,0) AS vendido,
+          COALESCE(m.desperdicio,0) AS desperdicio
         FROM products p
         LEFT JOIN movimentos m
           ON m.produto_id = p.id
@@ -29,31 +29,46 @@ def render(st, qdf, qexec):
          AND m.data = :d
         WHERE p.ativo = TRUE
         ORDER BY p.categoria, p.produto;
-    """, {"f": filial_id, "d": d})
+        """,
+        {"f": filial_id, "d": d},
+    )
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption("Você pode editar os valores e salvar (isso grava na tabela movimentos).")
 
-    st.divider()
-    st.subheader("Ajustar estoque manualmente")
+    edited = st.data_editor(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["produto_id", "categoria", "produto"],
+        num_rows="fixed",
+        key="estoque_editor",
+    )
 
-    # edição simples via select + input
-    if not df.empty:
-        opcoes = (df["categoria"] + " | " + df["produto"]).tolist()
-        escolha = st.selectbox("Produto", opcoes, index=0)
-        idx = opcoes.index(escolha)
-        pid = int(df.iloc[idx]["product_id"])
+    if st.button("Salvar alterações"):
+        for _, r in edited.iterrows():
+            pid = int(r["produto_id"])
+            qexec(
+                """
+                INSERT INTO movimentos (data, filial_id, produto_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio)
+                VALUES (:data, :filial, :pid, :e, :pp, :pr, :v, :dsp)
+                ON CONFLICT (data, filial_id, produto_id)
+                DO UPDATE SET
+                  estoque = EXCLUDED.estoque,
+                  produzido_planejado = EXCLUDED.produzido_planejado,
+                  produzido_real = EXCLUDED.produzido_real,
+                  vendido = EXCLUDED.vendido,
+                  desperdicio = EXCLUDED.desperdicio;
+                """,
+                {
+                    "data": d,
+                    "filial": filial_id,
+                    "pid": pid,
+                    "e": float(r["estoque"] or 0),
+                    "pp": float(r["produzido_planejado"] or 0),
+                    "pr": float(r["produzido_real"] or 0),
+                    "v": float(r["vendido"] or 0),
+                    "dsp": float(r["desperdicio"] or 0),
+                },
+            )
 
-        novo = st.number_input("Novo estoque", min_value=0.0, step=1.0, value=float(df.iloc[idx]["estoque"]))
-
-        if st.button("Salvar ajuste"):
-            try:
-                qexec("""
-                    INSERT INTO movimentos (data, filial_id, produto_id, estoque)
-                    VALUES (:data, :filial, :pid, :qtd)
-                    ON CONFLICT (data, filial_id, produto_id)
-                    DO UPDATE SET estoque = EXCLUDED.estoque;
-                """, {"data": d, "filial": filial_id, "pid": pid, "qtd": float(novo)})
-
-                st.success("Estoque ajustado com sucesso!")
-            except Exception as e:
-                st.error(f"Erro ao salvar ajuste: {e}")
+        st.success("Alterações salvas!")
