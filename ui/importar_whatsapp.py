@@ -1,48 +1,134 @@
 from datetime import date
-from services.whatsapp_parser import parse_whatsapp
+import pandas as pd
+
+from services.whatsapp_parser import parse_whatsapp_text
+
 
 def render(st, qdf, qexec, garantir_produto, get_filial_id):
     st.header("Importar WhatsApp (texto)")
 
-    filiais = qdf("SELECT nome FROM filiais ORDER BY nome;")["nome"].tolist()
     c1, c2 = st.columns([1, 1])
     with c1:
-        filial_nome = st.selectbox("Filial", filiais)
-        filial_id = get_filial_id(filial_nome)
+        filial = st.selectbox("Filial", ["AUSTIN", "QUEIMADOS"])
     with c2:
-        dia = st.date_input("Data", value=date.today())
+        data_ref = st.date_input("Data", value=date.today())
 
-    modo = st.radio("Salvar como:", ["Estoque (contagem)", "Produzido planejado"], horizontal=True)
-    texto = st.text_area("Cole o texto aqui", height=260)
+    filial_id = get_filial_id(filial)
+
+    modo = st.radio(
+        "Salvar como:",
+        ["Estoque (contagem)", "Produzido planejado"],
+        horizontal=True
+    )
+
+    texto = st.text_area("Cole o texto aqui", height=200)
+
+    # Estado para manter itens entre cliques
+    if "wa_items" not in st.session_state:
+        st.session_state["wa_items"] = []
+    if "wa_raw" not in st.session_state:
+        st.session_state["wa_raw"] = ""
 
     if st.button("Processar"):
-        itens = parse_whatsapp(texto)
-        if not itens:
-            st.warning("Não encontrei itens. Cole o texto no formato 'PRODUTO 10' e categorias em linhas separadas.")
-            return
+        try:
+            items = parse_whatsapp_text(texto)
+            st.session_state["wa_items"] = items
+            st.session_state["wa_raw"] = texto or ""
+            st.success(f"Itens detectados: {len(items)}")
+        except Exception as e:
+            st.session_state["wa_items"] = []
+            st.error(f"Erro ao processar: {e}")
 
-        st.write(f"Itens detectados: {len(itens)}")
-        for it in itens[:10]:
-            st.write(f"- {it.categoria} | {it.produto} = {it.quantidade}")
+    items = st.session_state.get("wa_items", [])
+
+    if items:
+        st.subheader(f"Itens detectados: {len(items)}")
+
+        # Mostrar lista amigável
+        for it in items[:200]:
+            cat = (it.get("categoria") or "(SEM)").strip().upper()
+            prod = (it.get("produto") or "").strip().upper()
+            qtd = float(it.get("quantidade") or 0)
+            st.write(f"• ({cat}) | {prod} = {qtd}")
+
+        st.divider()
 
         if st.button("Salvar no banco"):
-            for it in itens:
-                pid = garantir_produto(it.categoria, it.produto)
+            salvos = 0
+            erros = 0
+            erros_lista = []
 
-                if modo == "Estoque (contagem)":
-                    qexec("""
-                    INSERT INTO movimentos(dia, filial_id, produto_id, estoque)
-                    VALUES (:dia, :fid, :pid, :q)
-                    ON CONFLICT (dia, filial_id, produto_id)
-                    DO UPDATE SET estoque=EXCLUDED.estoque;
-                    """, {"dia": dia, "fid": filial_id, "pid": pid, "q": it.quantidade})
-                else:
-                    qexec("""
-                    INSERT INTO movimentos(dia, filial_id, produto_id, produzido_planejado)
-                    VALUES (:dia, :fid, :pid, :q)
-                    ON CONFLICT (dia, filial_id, produto_id)
-                    DO UPDATE SET produzido_planejado=EXCLUDED.produzido_planejado;
-                    """, {"dia": dia, "fid": filial_id, "pid": pid, "q": it.quantidade})
+            for it in items:
+                try:
+                    categoria = (it.get("categoria") or "(SEM)").strip().upper()
+                    produto = (it.get("produto") or "").strip().upper()
+                    quantidade = float(it.get("quantidade") or 0)
 
-            st.success("OK! Importação salva.")
-            st.rerun()
+                    if not produto:
+                        continue
+                    if quantidade <= 0:
+                        continue
+
+                    # garante produto e pega id
+                    produto_id = garantir_produto(categoria, produto)
+
+                    # monta campos conforme modo
+                    if modo == "Estoque (contagem)":
+                        sql = """
+                            INSERT INTO movimentos(data, filial_id, produto_id, estoque, observacoes)
+                            VALUES (:d, :f, :p, :q, :o)
+                            ON CONFLICT (data, filial_id, produto_id)
+                            DO UPDATE SET
+                              estoque = EXCLUDED.estoque,
+                              observacoes = EXCLUDED.observacoes;
+                        """
+                    else:
+                        sql = """
+                            INSERT INTO movimentos(data, filial_id, produto_id, produzido_planejado, observacoes)
+                            VALUES (:d, :f, :p, :q, :o)
+                            ON CONFLICT (data, filial_id, produto_id)
+                            DO UPDATE SET
+                              produzido_planejado = EXCLUDED.produzido_planejado,
+                              observacoes = EXCLUDED.observacoes;
+                        """
+
+                    qexec(sql, {
+                        "d": data_ref,
+                        "f": filial_id,
+                        "p": int(produto_id),
+                        "q": float(quantidade),
+                        "o": "IMPORT_WHATSAPP"
+                    })
+                    salvos += 1
+
+                except Exception as e:
+                    erros += 1
+                    erros_lista.append(f"{it} -> {e}")
+
+            if salvos > 0:
+                st.success(f"✅ Salvo(s): {salvos} item(ns)")
+            if erros > 0:
+                st.error(f"⚠️ Erros: {erros} item(ns)")
+                st.code("\n".join(erros_lista[:30]))
+
+            # Preview do que entrou no banco
+            st.subheader("Preview do que ficou gravado (movimentos)")
+            df_prev = qdf("""
+                SELECT
+                    m.data, f.nome AS filial, p.categoria, p.produto,
+                    COALESCE(m.estoque,0) AS estoque,
+                    COALESCE(m.produzido_planejado,0) AS produzido_planejado,
+                    COALESCE(m.produzido_real,0) AS produzido_real,
+                    COALESCE(m.vendido,0) AS vendido,
+                    COALESCE(m.desperdicio,0) AS desperdicio,
+                    m.observacoes
+                FROM movimentos m
+                JOIN filiais f ON f.id = m.filial_id
+                JOIN products p ON p.id = m.produto_id
+                WHERE m.data=:d AND m.filial_id=:f
+                ORDER BY p.categoria, p.produto;
+            """, {"d": data_ref, "f": filial_id})
+            st.dataframe(df_prev, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("Cole o texto e clique em **Processar**.")
