@@ -1,39 +1,36 @@
-def render(st, qdf, qexec, garantir_produto):
+import pandas as pd
+
+def render(st, qdf, qexec):
     st.header("Produtos")
 
     col1, col2 = st.columns([2, 1])
 
     with col1:
         df = qdf("""
-        SELECT
-          p.id,
-          COALESCE(c.nome,'(SEM CATEGORIA)') AS categoria,
-          p.nome AS produto,
-          p.ativo
-        FROM produtos p
-        LEFT JOIN categorias c ON c.id = p.categoria_id
-        ORDER BY c.nome NULLS LAST, p.nome;
+            SELECT id, categoria, produto, ativo
+            FROM products
+            ORDER BY categoria, produto;
         """)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     with col2:
-        st.subheader("Adicionar")
+        st.subheader("Adicionar produto")
         categoria = st.text_input("Categoria (ex: BOLO RETANGULAR)")
-        produto = st.text_input("Produto (ex: FERREIRO ROCHER)")
+        produto = st.text_input("Produto (ex: FERRERO ROCHER)")
+        ativo = st.checkbox("Ativo", value=True)
 
-        if st.button("Salvar produto"):
-            if produto.strip():
-                garantir_produto(categoria, produto)
+        if st.button("Salvar"):
+            if not categoria.strip() or not produto.strip():
+                st.warning("Categoria e Produto são obrigatórios.")
+            else:
+                qexec("""
+                    INSERT INTO products(categoria, produto, ativo)
+                    VALUES (:c, :p, :a)
+                    ON CONFLICT (categoria, produto) DO UPDATE SET ativo=EXCLUDED.ativo;
+                """, {
+                    "c": categoria.strip().upper(),
+                    "p": produto.strip().upper(),
+                    "a": bool(ativo),
+                })
                 st.success("Salvo!")
                 st.rerun()
-            else:
-                st.warning("Produto é obrigatório.")
-
-        st.divider()
-        st.subheader("Desativar / Ativar")
-        pid = st.number_input("ID do produto", min_value=1, step=1)
-        ac = st.selectbox("Ação", ["Ativar", "Desativar"])
-        if st.button("Aplicar"):
-            qexec("UPDATE produtos SET ativo=:a WHERE id=:id", {"a": (ac == "Ativar"), "id": int(pid)})
-            st.success("OK")
-            st.rerun()
