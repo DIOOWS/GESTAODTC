@@ -1,6 +1,11 @@
-from db import get_engine, reset_db
+from db import get_engine
+from sqlalchemy import text
 
-if __name__ == "__main__":
-    engine = get_engine()
-    reset_db(engine)
-    print("OK: banco resetado e tabelas recriadas.")
+engine = get_engine()
+
+with engine.begin() as conn:
+    conn.execute(text("DROP TABLE IF EXISTS movimentos CASCADE;"))
+    conn.execute(text("DROP TABLE IF EXISTS products CASCADE;"))
+    conn.execute(text("DROP TABLE IF EXISTS filiais CASCADE;"))
+
+print("Banco resetado.")

@@ -1,49 +1,53 @@
 import re
-from dataclasses import dataclass
-from typing import List
-from .helpers import norm
+import unicodedata
 
-# Regras:
-# - Linha sem número -> vira CATEGORIA (se curta)
-# - Linha com "NOME 10" ou "NOME: 10" -> ITEM
-# - Tudo vira MAIÚSCULO
 
-@dataclass
-class Item:
-    categoria: str
-    produto: str
-    quantidade: int
+def _clean(s: str) -> str:
+    if not s:
+        return ""
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    )
+    s = s.replace("\t", " ").replace("–", "-").replace("—", "-")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.upper()
 
-_num_re = re.compile(r"^(.*?)(?:\s*[:\-]\s*|\s+)(\d+)\s*$")
 
-def parse_whatsapp_text(texto: str, categoria_default: str = "GERAL") -> List[Item]:
-    linhas = (texto or "").splitlines()
-    cat_atual = norm(categoria_default) or "GERAL"
-    itens: List[Item] = []
+NUM_FIM = re.compile(r"^(.*?)(?:\s*[:=\-]\s*|\s+)(\d+(?:[.,]\d+)?)\s*$")
 
-    for ln in linhas:
-        raw = (ln or "").strip()
-        if not raw:
+
+def parse_whatsapp_text(texto: str):
+    """
+    Converte texto do WhatsApp em lista de dict:
+    [
+      {categoria, produto, quantidade}
+    ]
+    """
+    linhas = texto.splitlines()
+    categoria_atual = "(SEM)"
+    itens = []
+
+    for linha in linhas:
+        linha = linha.strip()
+        if not linha:
             continue
 
-        # categoria: sem número, curta
-        if not re.search(r"\d", raw) and len(raw) >= 3:
-            cand = norm(raw)
-            # evita pegar frases enormes
-            if len(cand) <= 40:
-                cat_atual = cand
-                continue
+        linha = _clean(linha)
+        m = NUM_FIM.match(linha)
 
-        m = _num_re.match(raw)
+        # se NÃO termina com número → é categoria
         if not m:
+            categoria_atual = linha
             continue
 
-        nome = norm(m.group(1))
-        qtd = int(m.group(2))
-        if nome:
-            itens.append(Item(categoria=cat_atual, produto=nome, quantidade=qtd))
+        produto = _clean(m.group(1))
+        qtd = float(m.group(2).replace(",", "."))
+
+        itens.append({
+            "categoria": categoria_atual,
+            "produto": produto,
+            "quantidade": qtd
+        })
 
     return itens
-
-# compat: se algum lugar chamar parse_whatsapp()
-parse_whatsapp = parse_whatsapp_text

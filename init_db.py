@@ -1,37 +1,72 @@
-from sqlalchemy import text
-
 def init_db(engine):
     with engine.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS produtos (
-            id SERIAL PRIMARY KEY,
-            nome TEXT NOT NULL UNIQUE,
-            categoria TEXT,
-            ativo BOOLEAN NOT NULL DEFAULT TRUE
-        );
-        """))
 
+        # --- Tabelas base ---
         conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS locais (
+        CREATE TABLE IF NOT EXISTS filiais (
             id SERIAL PRIMARY KEY,
             nome TEXT NOT NULL UNIQUE
         );
         """))
 
         conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS registros_diarios (
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
+            categoria TEXT NOT NULL,
+            produto TEXT NOT NULL,
+            ativo BOOLEAN NOT NULL DEFAULT TRUE,
+            UNIQUE (categoria, produto)
+        );
+        """))
+
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS movimentos (
             id SERIAL PRIMARY KEY,
             data DATE NOT NULL,
-            produto_id INT NOT NULL REFERENCES produtos(id) ON DELETE CASCADE,
-            local_id   INT NOT NULL REFERENCES locais(id)   ON DELETE CASCADE,
+            filial_id INT NOT NULL REFERENCES filiais(id),
+            product_id INT NOT NULL REFERENCES products(id),
 
-            estoque NUMERIC(12,2),
-            produzido NUMERIC(12,2),
-            enviado NUMERIC(12,2),
-            vendido NUMERIC(12,2),
-            desperdicio NUMERIC(12,2),
+            estoque NUMERIC(12,2) DEFAULT 0,
+            produzido_planejado NUMERIC(12,2) DEFAULT 0,
+            produzido_real NUMERIC(12,2) DEFAULT 0,
+            vendido NUMERIC(12,2) DEFAULT 0,
+            desperdicio NUMERIC(12,2) DEFAULT 0,
+
             observacoes TEXT,
-
-            UNIQUE (data, produto_id, local_id)
+            UNIQUE (data, filial_id, product_id)
         );
+        """))
+
+        # --- MIGRAÇÕES AUTOMÁTICAS ---
+        # dia/day -> data
+        for old in ("dia", "day"):
+            conn.execute(text(f"""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='movimentos' AND column_name='{old}'
+                    ) THEN
+                        ALTER TABLE movimentos RENAME COLUMN "{old}" TO data;
+                    END IF;
+                END$$;
+            """))
+
+        # produto_id -> product_id
+        conn.execute(text("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='movimentos' AND column_name='produto_id'
+            ) THEN
+                ALTER TABLE movimentos RENAME COLUMN produto_id TO product_id;
+            END IF;
+        END$$;
+        """))
+
+        # Seed filiais
+        conn.execute(text("""
+        INSERT INTO filiais(nome) VALUES ('AUSTIN'), ('QUEIMADOS')
+        ON CONFLICT DO NOTHING;
         """))

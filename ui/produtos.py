@@ -1,37 +1,34 @@
 def render(st, qdf, qexec):
     st.header("Produtos")
 
-    col1, col2 = st.columns([2,1])
+    st.subheader("Cadastrar produto")
+    c1, c2 = st.columns(2)
+    categoria = c1.text_input("Categoria (ex: BOLO RETANGULAR)")
+    produto = c2.text_input("Produto (ex: PRESTÍGIO)")
 
-    with col1:
-        df = qdf("""
-            SELECT id, categoria, produto, ativo
-            FROM products
-            ORDER BY categoria, produto;
-        """)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-    with col2:
-        st.subheader("Adicionar")
-        categoria = st.text_input("Categoria (ex: BOLO RETANGULAR)")
-        produto = st.text_input("Produto/Sabor (ex: FERRERO ROCHER)")
-        if st.button("Salvar produto"):
-            if categoria.strip() and produto.strip():
+    if st.button("Adicionar"):
+        try:
+            cat = (categoria or "").strip().upper()
+            prod = (produto or "").strip().upper()
+            if not cat or not prod:
+                st.warning("Preencha categoria e produto.")
+            else:
                 qexec("""
                     INSERT INTO products(categoria, produto)
                     VALUES (:c, :p)
                     ON CONFLICT (categoria, produto) DO NOTHING;
-                """, {"c": categoria.strip().upper(), "p": produto.strip().upper()})
-                st.success("Salvo!")
-                st.rerun()
-            else:
-                st.warning("Categoria e Produto são obrigatórios.")
+                """, {"c": cat, "p": prod})
+                st.success("Produto adicionado!")
+        except Exception as e:
+            st.error(f"Erro: {e}")
 
-        st.divider()
-        st.subheader("Excluir (opcional)")
-        pid = st.number_input("ID do produto para excluir", min_value=0, step=1)
-        if st.button("Excluir produto"):
-            if pid > 0:
-                qexec("DELETE FROM products WHERE id=:id;", {"id": int(pid)})
-                st.success("Excluído.")
-                st.rerun()
+    st.subheader("Lista de produtos")
+    df = qdf("""
+        SELECT id, categoria, produto, ativo
+        FROM products
+        ORDER BY categoria, produto;
+    """)
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.caption("Para desativar/ativar produtos depois, a gente adiciona botão de excluir/ativar na próxima rodada.")
