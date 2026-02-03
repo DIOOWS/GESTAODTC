@@ -1,96 +1,89 @@
 from datetime import date
+from sqlalchemy import text
+import pandas as pd
 
 
-def render(st, qdf, qexec, get_filial_id):
-    st.header("Transferências")
+def render(st, qdf, qexec, garantir_produto, get_filial_id):
+    st.header("Transferências (Austin ⇄ Queimados)")
 
-    col1, col2, col3 = st.columns(3)
-    de_filial = col1.selectbox("De (origem)", ["AUSTIN", "QUEIMADOS"], index=0)
-    para_filial = col2.selectbox("Para (destino)", ["QUEIMADOS", "AUSTIN"], index=0)
-    dia = col3.date_input("Data", value=date.today())
+    c1, c2 = st.columns(2)
+    d = c1.date_input("Data", value=date.today())
+    sentido = c2.selectbox("Sentido", ["AUSTIN → QUEIMADOS", "QUEIMADOS → AUSTIN"], index=0)
 
-    if de_filial == para_filial:
-        st.warning("Origem e destino não podem ser iguais.")
-        st.stop()
+    if sentido.startswith("AUSTIN"):
+        de_nome, para_nome = "AUSTIN", "QUEIMADOS"
+    else:
+        de_nome, para_nome = "QUEIMADOS", "AUSTIN"
 
-    produtos = qdf("""
+    st.caption("Isso registra a transferência e ajusta o estoque do dia nas duas filiais.")
+
+    # Produto
+    df_prod = qdf("""
         SELECT id, categoria, produto
         FROM products
         WHERE ativo = TRUE
-        ORDER BY categoria, produto
+        ORDER BY categoria, produto;
     """)
-    if produtos.empty:
-        st.info("Cadastre produtos primeiro.")
-        st.stop()
+    if df_prod.empty:
+        st.warning("Nenhum produto cadastrado ainda. Importe pelo Excel/WhatsApp primeiro.")
+        return
 
-    produtos["label"] = produtos["categoria"] + " - " + produtos["produto"]
-    label = st.selectbox("Produto", produtos["label"])
-    produto_id = int(produtos.loc[produtos["label"] == label, "id"].iloc[0])
+    df_prod["label"] = df_prod["categoria"] + " — " + df_prod["produto"]
+    label = st.selectbox("Produto", df_prod["label"].tolist())
+    produto_id = int(df_prod.loc[df_prod["label"] == label, "id"].iloc[0])
 
-    qtd = st.number_input("Quantidade transferida", min_value=0.0, step=1.0)
+    qtd = st.number_input("Quantidade transferida", min_value=0.0, step=1.0, value=0.0)
     obs = st.text_input("Observações (opcional)")
 
-    if st.button("Registrar transferência"):
-        de_id = get_filial_id(de_filial)
-        para_id = get_filial_id(para_filial)
+    if st.button("Salvar transferência"):
+        de_id = get_filial_id(de_nome)
+        para_id = get_filial_id(para_nome)
 
-        # registra transferência
-        qexec("""
-            INSERT INTO transferencias (dia, de_filial_id, para_filial_id, produto_id, quantidade, observacoes)
-            VALUES (:dia, :de, :para, :pid, :qtd, :obs);
-        """, {"dia": dia, "de": de_id, "para": para_id, "pid": produto_id, "qtd": qtd, "obs": obs or None})
+        try:
+            # 1) registra a transferência
+            qexec("""
+                INSERT INTO transferencias (data, de_filial_id, para_filial_id, produto_id, quantidade, observacoes)
+                VALUES (:data, :de, :para, :pid, :qtd, :obs);
+            """, {"data": d, "de": de_id, "para": para_id, "pid": produto_id, "qtd": float(qtd), "obs": obs or None})
 
-        # aplica efeito no estoque do dia (delta):
-        # - origem: diminui estoque
-        qexec("""
-            INSERT INTO movimentacoes (dia, filial_id, produto_id, estoque)
-            VALUES (:dia, :filial, :pid, 0)
-            ON CONFLICT (dia, filial_id, produto_id) DO NOTHING;
-        """, {"dia": dia, "filial": de_id, "pid": produto_id})
-        qexec("""
-            UPDATE movimentacoes
-            SET estoque = COALESCE(estoque,0) - :qtd
-            WHERE dia=:dia AND filial_id=:filial AND produto_id=:pid;
-        """, {"dia": dia, "filial": de_id, "pid": produto_id, "qtd": qtd})
+            # 2) ajusta estoque do dia (de: -qtd, para: +qtd)
+            # UPSERT em movimentos: se não existe, cria com estoque = +/-qtd
+            qexec("""
+                INSERT INTO movimentos (data, filial_id, produto_id, estoque)
+                VALUES (:data, :filial, :pid, :delta)
+                ON CONFLICT (data, filial_id, produto_id)
+                DO UPDATE SET estoque = COALESCE(movimentos.estoque,0) + EXCLUDED.estoque;
+            """, {"data": d, "filial": de_id, "pid": produto_id, "delta": -float(qtd)})
 
-        # + destino: aumenta estoque
-        qexec("""
-            INSERT INTO movimentacoes (dia, filial_id, produto_id, estoque)
-            VALUES (:dia, :filial, :pid, 0)
-            ON CONFLICT (dia, filial_id, produto_id) DO NOTHING;
-        """, {"dia": dia, "filial": para_id, "pid": produto_id})
-        qexec("""
-            UPDATE movimentacoes
-            SET estoque = COALESCE(estoque,0) + :qtd
-            WHERE dia=:dia AND filial_id=:filial AND produto_id=:pid;
-        """, {"dia": dia, "filial": para_id, "pid": produto_id, "qtd": qtd})
+            qexec("""
+                INSERT INTO movimentos (data, filial_id, produto_id, estoque)
+                VALUES (:data, :filial, :pid, :delta)
+                ON CONFLICT (data, filial_id, produto_id)
+                DO UPDATE SET estoque = COALESCE(movimentos.estoque,0) + EXCLUDED.estoque;
+            """, {"data": d, "filial": para_id, "pid": produto_id, "delta": float(qtd)})
 
-        st.success("Transferência registrada e estoque ajustado.")
-        st.rerun()
+            st.success("Transferência salva e estoque ajustado ✅")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao salvar transferência: {e}")
 
     st.divider()
-    st.subheader("Histórico (últimas 200)")
+    st.subheader("Histórico (últimos 50)")
 
-    hist = qdf("""
-        SELECT t.id, t.dia,
-               f1.nome AS origem,
-               f2.nome AS destino,
-               p.categoria, p.produto,
-               t.quantidade, t.observacoes
+    df_hist = qdf("""
+        SELECT
+          t.data,
+          f1.nome AS de,
+          f2.nome AS para,
+          p.categoria,
+          p.produto,
+          t.quantidade,
+          t.observacoes
         FROM transferencias t
         JOIN filiais f1 ON f1.id = t.de_filial_id
         JOIN filiais f2 ON f2.id = t.para_filial_id
         JOIN products p ON p.id = t.produto_id
-        ORDER BY t.dia DESC, t.id DESC
-        LIMIT 200;
+        ORDER BY t.data DESC, t.id DESC
+        LIMIT 50;
     """)
-
-    st.dataframe(hist, use_container_width=True, hide_index=True)
-
-    st.subheader("Excluir transferência (se errou)")
-    del_id = st.number_input("ID da transferência", min_value=1, step=1)
-    st.caption("Obs: excluir não reverte o estoque automaticamente (pra evitar bagunça). Ajuste no Estoque se precisar.")
-    if st.button("Excluir transferência"):
-        qexec("DELETE FROM transferencias WHERE id=:id;", {"id": int(del_id)})
-        st.success("Excluída!")
-        st.rerun()
+    st.dataframe(df_hist, use_container_width=True, hide_index=True)
