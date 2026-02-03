@@ -6,7 +6,7 @@ from sqlalchemy import text
 from db import get_engine, init_db
 
 # IMPORTA DIRETO OS MÓDULOS (sem depender de ui/__init__.py importar coisas)
-from ui import painel, produtos, lancamentos, transferencias, estoque, relatorios, importar_excel, importar_whatsapp
+from ui import painel, produtos, lancamentos, transferencia, estoque, relatorios, importar_excel, importar_whatsapp
 
 st.set_page_config(page_title="Padaria | Controle", layout="wide")
 
@@ -100,7 +100,7 @@ elif page == "Lançamentos":
     lancamentos.render(st, qdf, qexec, garantir_produto, get_filial_id)
 
 elif page == "Transferências":
-    transferencias.render(st, qdf, qexec, garantir_produto, get_filial_id)
+    transferencia.render(st, qdf, qexec, garantir_produto, get_filial_id)
 
 elif page == "Estoque":
     estoque.render(st, qdf, qexec, get_filial_id)
