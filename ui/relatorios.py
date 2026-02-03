@@ -1,13 +1,33 @@
 from datetime import date, timedelta
 
-def render(st, qdf):
+
+def render(st, qdf, get_filial_id):
     st.header("Relatórios")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     d2 = col2.date_input("Até", value=date.today())
     d1 = col1.date_input("De", value=d2 - timedelta(days=7))
+    filial = col3.selectbox("Filial (opcional)", ["TODAS", "AUSTIN", "QUEIMADOS"], index=0)
 
-    df = qdf("""
+    filtro_filial = ""
+    params = {"d1": d1, "d2": d2}
+    if filial != "TODAS":
+        filtro_filial = " AND m.filial_id = :f "
+        params["f"] = get_filial_id(filial)
+
+    df = qdf(f"""
+        WITH tin AS (
+            SELECT data, para_filial_id AS filial_id, product_id, COALESCE(SUM(quantidade),0) AS transf_in
+            FROM transferencias
+            WHERE data BETWEEN :d1 AND :d2
+            GROUP BY data, para_filial_id, product_id
+        ),
+        tout AS (
+            SELECT data, de_filial_id AS filial_id, product_id, COALESCE(SUM(quantidade),0) AS transf_out
+            FROM transferencias
+            WHERE data BETWEEN :d1 AND :d2
+            GROUP BY data, de_filial_id, product_id
+        )
         SELECT
           m.data,
           f.nome AS filial,
@@ -18,12 +38,26 @@ def render(st, qdf):
           COALESCE(m.produzido_real,0) AS produzido_real,
           COALESCE(m.vendido,0) AS vendido,
           COALESCE(m.desperdicio,0) AS desperdicio,
+          COALESCE(ti.transf_in,0) AS transf_in,
+          COALESCE(to2.transf_out,0) AS transf_out,
+          (
+            COALESCE(m.estoque,0)
+            + COALESCE(m.produzido_planejado,0)
+            + COALESCE(m.produzido_real,0)
+            - COALESCE(m.vendido,0)
+            - COALESCE(m.desperdicio,0)
+            - COALESCE(to2.transf_out,0)
+            + COALESCE(ti.transf_in,0)
+          ) AS saldo_calculado,
           m.observacoes
         FROM movimentos m
         JOIN filiais f ON f.id = m.filial_id
         JOIN products p ON p.id = m.product_id
+        LEFT JOIN tin ti ON ti.data = m.data AND ti.filial_id = m.filial_id AND ti.product_id = m.product_id
+        LEFT JOIN tout to2 ON to2.data = m.data AND to2.filial_id = m.filial_id AND to2.product_id = m.product_id
         WHERE m.data BETWEEN :d1 AND :d2
+        {filtro_filial}
         ORDER BY m.data DESC, f.nome, p.categoria, p.produto;
-    """, {"d1": d1, "d2": d2})
+    """, params)
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)

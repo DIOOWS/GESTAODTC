@@ -5,9 +5,14 @@ from sqlalchemy import text
 
 from db import get_engine, init_db
 
-# importa módulos direto (evita circular import do ui/__init__.py)
-from ui import painel, produtos, lancamentos, transferencias, estoque, relatorios, importar_excel, importar_whatsapp
-
+import ui.painel as painel
+import ui.produtos as produtos
+import ui.lancamentos as lancamentos
+import ui.transferencias as transferencias
+import ui.estoque as estoque
+import ui.relatorios as relatorios
+import ui.importar_excel as importar_excel
+import ui.importar_whatsapp as importar_whatsapp
 
 st.set_page_config(page_title="Padaria | Controle", layout="wide")
 
@@ -49,7 +54,7 @@ def qexec(sql, params=None):
     with engine.begin() as conn:
         conn.execute(text(sql), params or {})
 
-# Helpers
+# Helpers: filiais e produto
 def get_filial_id(nome: str) -> int:
     nome = (nome or "").strip().upper()
     df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome})
@@ -84,12 +89,20 @@ def garantir_produto(categoria: str, produto_nome: str) -> int:
     )
     return int(df.iloc[0]["id"])
 
-
 # --- Sidebar ---
 st.sidebar.title("📦 Padaria")
 page = st.sidebar.radio(
     "Menu",
-    ["Painel", "Produtos", "Lançamentos", "Transferências", "Estoque", "Relatórios", "Importar Excel", "Importar WhatsApp"],
+    [
+        "Painel",
+        "Produtos",
+        "Lançamentos",
+        "Transferências",
+        "Estoque",
+        "Relatórios",
+        "Importar Excel",
+        "Importar WhatsApp",
+    ],
 )
 
 # --- Router ---
@@ -109,7 +122,7 @@ elif page == "Estoque":
     estoque.render(st, qdf, qexec, get_filial_id)
 
 elif page == "Relatórios":
-    relatorios.render(st, qdf)
+    relatorios.render(st, qdf, get_filial_id)
 
 elif page == "Importar Excel":
     importar_excel.render(st, qdf, qexec, garantir_produto)
