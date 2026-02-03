@@ -5,12 +5,13 @@ from sqlalchemy import text
 
 from db import get_engine, init_db
 
-# IMPORTA DIRETO OS MÓDULOS (sem depender de ui/__init__.py importar coisas)
-from ui import painel, produtos, lancamentos, transferencia, estoque, relatorios, importar_excel, importar_whatsapp
+# importa módulos direto (evita circular import do ui/__init__.py)
+from ui import painel, produtos, lancamentos, transferencias, estoque, relatorios, importar_excel, importar_whatsapp
+
 
 st.set_page_config(page_title="Padaria | Controle", layout="wide")
 
-# --- Tema (sua paleta) ---
+# --- Tema ---
 st.markdown("""
 <style>
 :root{
@@ -29,7 +30,7 @@ div[data-testid="stDataFrame"] { background: var(--panel); border-radius: 12px; 
 </style>
 """, unsafe_allow_html=True)
 
-# --- Login simples ---
+# --- Login simples (opcional) ---
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 if APP_PASSWORD:
     pw = st.sidebar.text_input("Senha", type="password")
@@ -48,6 +49,7 @@ def qexec(sql, params=None):
     with engine.begin() as conn:
         conn.execute(text(sql), params or {})
 
+# Helpers
 def get_filial_id(nome: str) -> int:
     nome = (nome or "").strip().upper()
     df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome})
@@ -82,6 +84,7 @@ def garantir_produto(categoria: str, produto_nome: str) -> int:
     )
     return int(df.iloc[0]["id"])
 
+
 # --- Sidebar ---
 st.sidebar.title("📦 Padaria")
 page = st.sidebar.radio(
@@ -100,7 +103,7 @@ elif page == "Lançamentos":
     lancamentos.render(st, qdf, qexec, garantir_produto, get_filial_id)
 
 elif page == "Transferências":
-    transferencia.render(st, qdf, qexec, garantir_produto, get_filial_id)
+    transferencias.render(st, qdf, qexec, garantir_produto, get_filial_id)
 
 elif page == "Estoque":
     estoque.render(st, qdf, qexec, get_filial_id)

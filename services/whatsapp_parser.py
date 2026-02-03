@@ -1,65 +1,52 @@
 import re
-from unidecode import unidecode
 
-
-def _norm(s: str) -> str:
+def _clean(s: str) -> str:
     s = (s or "").strip()
-    s = s.replace("\t", " ")
     s = re.sub(r"\s+", " ", s)
-    # mantém acento para exibição, mas padroniza maiúscula
-    return s.upper()
-
+    return s
 
 def parse_whatsapp_text(texto: str):
     """
-    Aceita texto estilo:
-    BOLO CASEIRO
-    AIPIM CREMOSO 8
-    PUDIM DE PÃO 6
+    Espera linhas tipo:
+      BOLO RETANGULAR
+      PRESTÍGIO 1
+      LIMÃO: 2
+      FERREIRO ROCHER - 1
 
-    Se a linha NÃO termina em número => vira categoria atual.
-    Se termina em número => vira item com (categoria, produto, quantidade)
+    Regras:
+    - Se a linha tem número no final, vira item
+    - Categoria: última categoria vista (linha sem número)
+    - Se não tiver categoria ainda: '(SEM)'
     """
-    if not texto:
-        return []
+    texto = (texto or "").replace("\r", "\n")
+    linhas = [l.strip() for l in texto.split("\n") if l.strip()]
 
-    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
     itens = []
+    categoria_atual = "(SEM)"
 
-    categoria_atual = "GERAL"
+    # aceita "X 2", "X:2", "X - 2", "X = 2"
+    pat = re.compile(r"^(.*?)(?:\s*[:=\-]\s*|\s+)(\d+(?:[.,]\d+)?)$")
 
     for ln in linhas:
-        l = ln.strip()
+        ln = _clean(ln)
 
-        # normaliza separadores comuns
-        l = l.replace(":", " ")
-        l = re.sub(r"\s+", " ", l)
-
-        m = re.match(r"^(.*?)(\d+(?:[.,]\d+)?)\s*$", l)
+        m = pat.match(ln)
         if not m:
-            # categoria
-            cat = _norm(l)
-            # evita categorias tipo "ESSE É UM EXEMPLO..." se vier no texto
-            if len(cat) >= 2:
-                categoria_atual = cat
+            # categoria (linha sem número)
+            categoria_atual = ln.upper()
             continue
 
-        produto_raw = m.group(1).strip()
-        qtd_raw = m.group(2).replace(",", ".")
+        nome = _clean(m.group(1)).upper()
+        qtd = float(m.group(2).replace(",", "."))
 
-        try:
-            qtd = float(qtd_raw)
-        except Exception:
-            continue
+        # correção automática: remove duplicação "CATEGORIA - CATEGORIA - SABOR"
+        if nome.startswith(categoria_atual + " - "):
+            nome = nome[len(categoria_atual) + 3:].strip()
 
-        produto = _norm(produto_raw)
-        categoria = _norm(categoria_atual)
-
-        if produto:
-            itens.append({
-                "categoria": categoria,
-                "produto": produto,
-                "quantidade": qtd
-            })
+        itens.append({
+            "categoria": categoria_atual.upper(),
+            "produto": nome,
+            "quantidade": qtd
+        })
 
     return itens

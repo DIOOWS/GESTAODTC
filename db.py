@@ -1,7 +1,6 @@
 import os
 from sqlalchemy import create_engine, text
 
-
 def get_engine():
     url = os.getenv("DATABASE_URL")
     if not url:
@@ -9,33 +8,51 @@ def get_engine():
     url = url.replace("postgres://", "postgresql://", 1)
     return create_engine(url, pool_pre_ping=True)
 
-
-def _col_exists(conn, table, col):
-    r = conn.execute(
-        text("""
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema='public' AND table_name=:t AND column_name=:c
-            LIMIT 1;
-        """),
-        {"t": table, "c": col},
-    ).fetchone()
+def _table_exists(conn, table: str) -> bool:
+    r = conn.execute(text("""
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema='public' AND table_name=:t
+        LIMIT 1;
+    """), {"t": table}).fetchone()
     return r is not None
 
+def _col_exists(conn, table: str, col: str) -> bool:
+    r = conn.execute(text("""
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name=:t AND column_name=:c
+        LIMIT 1;
+    """), {"t": table, "c": col}).fetchone()
+    return r is not None
 
-def _rename_col_if_exists(conn, table, old, new):
-    if _col_exists(conn, table, old) and not _col_exists(conn, table, new):
+def _rename_table(conn, old: str, new: str):
+    if _table_exists(conn, old) and not _table_exists(conn, new):
+        conn.execute(text(f'ALTER TABLE "{old}" RENAME TO "{new}";'))
+
+def _rename_col(conn, table: str, old: str, new: str):
+    if _table_exists(conn, table) and _col_exists(conn, table, old) and not _col_exists(conn, table, new):
         conn.execute(text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";'))
-
 
 def init_db(engine):
     with engine.begin() as conn:
-        # --- Tabelas base ---
+        # migrações de nomes antigos (se existirem)
+        _rename_table(conn, "movimentacoes", "movimentos")
+        _rename_col(conn, "movimentos", "dia", "data")
+        _rename_col(conn, "movimentos", "day", "data")
+        _rename_col(conn, "movimentos", "produto_id", "product_id")
+        _rename_col(conn, "movimentos", "produtoid", "product_id")
+
+        _rename_col(conn, "transferencias", "dia", "data")
+        _rename_col(conn, "transferencias", "day", "data")
+        _rename_col(conn, "transferencias", "produto_id", "product_id")
+
+        # tabelas padrão
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS products (
           id SERIAL PRIMARY KEY,
           categoria TEXT NOT NULL,
-          produto   TEXT NOT NULL,
+          produto TEXT NOT NULL,
           ativo BOOLEAN NOT NULL DEFAULT TRUE
         );
         """))
@@ -56,7 +73,7 @@ def init_db(engine):
           id SERIAL PRIMARY KEY,
           data DATE NOT NULL,
           filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
-          produto_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
 
           estoque NUMERIC(12,2) DEFAULT 0,
           produzido_planejado NUMERIC(12,2) DEFAULT 0,
@@ -65,34 +82,22 @@ def init_db(engine):
           desperdicio NUMERIC(12,2) DEFAULT 0,
 
           observacoes TEXT,
-          UNIQUE (data, filial_id, produto_id)
+          UNIQUE (data, filial_id, product_id)
         );
         """))
 
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS transferencias (
           id SERIAL PRIMARY KEY,
-          data_toggle TIMESTAMP DEFAULT NOW(), -- só audit (não usar pra filtro)
           data DATE NOT NULL,
           de_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
           para_filial_id INT NOT NULL REFERENCES filiais(id) ON DELETE CASCADE,
-          produto_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+          product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
           quantidade NUMERIC(12,2) NOT NULL DEFAULT 0,
           observacoes TEXT
         );
         """))
 
-        # Seed filiais padrão
+        # seeds
         conn.execute(text("INSERT INTO filiais(nome) VALUES ('AUSTIN') ON CONFLICT (nome) DO NOTHING;"))
         conn.execute(text("INSERT INTO filiais(nome) VALUES ('QUEIMADOS') ON CONFLICT (nome) DO NOTHING;"))
-
-        # --- Migração/Padronização colunas ---
-        # data
-        _rename_col_if_exists(conn, "movimentos", "day", "data")
-        _rename_col_if_exists(conn, "movimentos", "dia", "data")
-        _rename_col_if_exists(conn, "transferencias", "day", "data")
-        _rename_col_if_exists(conn, "transferencias", "dia", "data")
-
-        # produto_id (corrige schemas antigos)
-        _rename_col_if_exists(conn, "movimentos", "product_id", "produto_id")
-        _rename_col_if_exists(conn, "transferencias", "product_id", "produto_id")
