@@ -1,53 +1,65 @@
 import re
-import unicodedata
+from unidecode import unidecode
 
 
-def _clean(s: str) -> str:
-    if not s:
-        return ""
-    s = "".join(
-        c for c in unicodedata.normalize("NFKD", s)
-        if not unicodedata.combining(c)
-    )
-    s = s.replace("\t", " ").replace("–", "-").replace("—", "-")
-    s = re.sub(r"\s+", " ", s).strip()
+def _norm(s: str) -> str:
+    s = (s or "").strip()
+    s = s.replace("\t", " ")
+    s = re.sub(r"\s+", " ", s)
+    # mantém acento para exibição, mas padroniza maiúscula
     return s.upper()
-
-
-NUM_FIM = re.compile(r"^(.*?)(?:\s*[:=\-]\s*|\s+)(\d+(?:[.,]\d+)?)\s*$")
 
 
 def parse_whatsapp_text(texto: str):
     """
-    Converte texto do WhatsApp em lista de dict:
-    [
-      {categoria, produto, quantidade}
-    ]
+    Aceita texto estilo:
+    BOLO CASEIRO
+    AIPIM CREMOSO 8
+    PUDIM DE PÃO 6
+
+    Se a linha NÃO termina em número => vira categoria atual.
+    Se termina em número => vira item com (categoria, produto, quantidade)
     """
-    linhas = texto.splitlines()
-    categoria_atual = "(SEM)"
+    if not texto:
+        return []
+
+    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
     itens = []
 
-    for linha in linhas:
-        linha = linha.strip()
-        if not linha:
-            continue
+    categoria_atual = "GERAL"
 
-        linha = _clean(linha)
-        m = NUM_FIM.match(linha)
+    for ln in linhas:
+        l = ln.strip()
 
-        # se NÃO termina com número → é categoria
+        # normaliza separadores comuns
+        l = l.replace(":", " ")
+        l = re.sub(r"\s+", " ", l)
+
+        m = re.match(r"^(.*?)(\d+(?:[.,]\d+)?)\s*$", l)
         if not m:
-            categoria_atual = linha
+            # categoria
+            cat = _norm(l)
+            # evita categorias tipo "ESSE É UM EXEMPLO..." se vier no texto
+            if len(cat) >= 2:
+                categoria_atual = cat
             continue
 
-        produto = _clean(m.group(1))
-        qtd = float(m.group(2).replace(",", "."))
+        produto_raw = m.group(1).strip()
+        qtd_raw = m.group(2).replace(",", ".")
 
-        itens.append({
-            "categoria": categoria_atual,
-            "produto": produto,
-            "quantidade": qtd
-        })
+        try:
+            qtd = float(qtd_raw)
+        except Exception:
+            continue
+
+        produto = _norm(produto_raw)
+        categoria = _norm(categoria_atual)
+
+        if produto:
+            itens.append({
+                "categoria": categoria,
+                "produto": produto,
+                "quantidade": qtd
+            })
 
     return itens

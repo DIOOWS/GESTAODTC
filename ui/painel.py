@@ -25,44 +25,35 @@ def _one(qdf, sql, params):
 
 def _sum_range(qdf, d1, d2):
     vendido = _one(qdf, """
-        SELECT COALESCE(SUM(vendido),0) AS vendido
-        FROM movimentos
-        WHERE data BETWEEN :d1 AND :d2;
+        SELECT COALESCE(SUM(vendido),0) FROM movimentacoes
+        WHERE dia BETWEEN :d1 AND :d2;
     """, {"d1": d1, "d2": d2})
 
-    produzido_real = _one(qdf, """
-        SELECT COALESCE(SUM(produzido_real),0) AS produzido_real
-        FROM movimentos
-        WHERE data BETWEEN :d1 AND :d2;
+    prod_real = _one(qdf, """
+        SELECT COALESCE(SUM(produzido_real),0) FROM movimentacoes
+        WHERE dia BETWEEN :d1 AND :d2;
     """, {"d1": d1, "d2": d2})
 
     desperdicio = _one(qdf, """
-        SELECT COALESCE(SUM(desperdicio),0) AS desperdicio
-        FROM movimentos
-        WHERE data BETWEEN :d1 AND :d2;
+        SELECT COALESCE(SUM(desperdicio),0) FROM movimentacoes
+        WHERE dia BETWEEN :d1 AND :d2;
     """, {"d1": d1, "d2": d2})
 
-    estoque_soma = _one(qdf, """
-        SELECT COALESCE(SUM(estoque),0) AS estoque
-        FROM movimentos
-        WHERE data BETWEEN :d1 AND :d2;
+    transferido = _one(qdf, """
+        SELECT COALESCE(SUM(quantidade),0) FROM transferencias
+        WHERE dia BETWEEN :d1 AND :d2;
     """, {"d1": d1, "d2": d2})
 
-    return {
-        "vendido": vendido,
-        "produzido_real": produzido_real,
-        "desperdicio": desperdicio,
-        "estoque_soma": estoque_soma,
-    }
+    return {"vendido": vendido, "prod_real": prod_real, "desperdicio": desperdicio, "transferido": transferido}
 
 
 def _bloco(st, titulo, k):
     st.subheader(titulo)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Vendas", int(round(_to_num(k["vendido"]))))
-    c2.metric("Produzido (real)", int(round(_to_num(k["produzido_real"]))))
+    c2.metric("Produzido (real)", int(round(_to_num(k["prod_real"]))))
     c3.metric("Desperdício", int(round(_to_num(k["desperdicio"]))))
-    c4.metric("Estoque (soma)", int(round(_to_num(k["estoque_soma"]))))
+    c4.metric("Transferido", int(round(_to_num(k["transferido"]))))
 
 
 def render(st, qdf):
@@ -76,4 +67,4 @@ def render(st, qdf):
     _bloco(st, "Semana (segunda → hoje)", _sum_range(qdf, inicio_semana, hoje))
     _bloco(st, "Mês (1º dia → hoje)", _sum_range(qdf, inicio_mes, hoje))
 
-    st.caption("Totais atualizam conforme você lança movimentos (estoque/produção/venda/desperdício).")
+    st.caption("Totais atualizam conforme você lança movimentos e transferências.")

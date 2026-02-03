@@ -4,12 +4,11 @@ import pandas as pd
 from sqlalchemy import text
 
 from db import get_engine, init_db
-
-from ui import painel, produtos, lancamentos, estoque, relatorios, importar_excel, importar_whatsapp
+from ui import painel, produtos, lancamentos, transferencias, estoque, relatorios, importar_excel, importar_whatsapp
 
 st.set_page_config(page_title="Padaria | Controle", layout="wide")
 
-# --- Tema ---
+# --- Tema (sua paleta) ---
 st.markdown("""
 <style>
 :root{
@@ -25,6 +24,7 @@ section[data-testid="stSidebar"] { background: var(--panel) !important; }
 div[data-testid="stMetric"] { background: var(--panel); padding: 12px; border-radius: 12px; border: 1px solid rgba(236,215,195,0.12); }
 .stButton>button { background: var(--accent) !important; color: #020204 !important; border: none; font-weight: 700; }
 div[data-testid="stDataFrame"] { background: var(--panel); border-radius: 12px; }
+div[data-testid="stDataEditor"] { background: var(--panel); border-radius: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -63,10 +63,7 @@ def garantir_produto(categoria: str, produto_nome: str) -> int:
     if not categoria or not produto_nome:
         raise ValueError("categoria e produto são obrigatórios")
 
-    df = qdf(
-        "SELECT id FROM products WHERE categoria=:c AND produto=:p;",
-        {"c": categoria, "p": produto_nome},
-    )
+    df = qdf("SELECT id FROM products WHERE categoria=:c AND produto=:p;", {"c": categoria, "p": produto_nome})
     if not df.empty:
         return int(df.iloc[0]["id"])
 
@@ -76,21 +73,16 @@ def garantir_produto(categoria: str, produto_nome: str) -> int:
         ON CONFLICT (categoria, produto) DO NOTHING;
     """, {"c": categoria, "p": produto_nome})
 
-    df = qdf(
-        "SELECT id FROM products WHERE categoria=:c AND produto=:p;",
-        {"c": categoria, "p": produto_nome},
-    )
+    df = qdf("SELECT id FROM products WHERE categoria=:c AND produto=:p;", {"c": categoria, "p": produto_nome})
     return int(df.iloc[0]["id"])
-
 
 # --- Sidebar ---
 st.sidebar.title("📦 Padaria")
 page = st.sidebar.radio(
     "Menu",
-    ["Painel", "Produtos", "Lançamentos", "Estoque", "Relatórios", "Importar Excel", "Importar WhatsApp"],
+    ["Painel", "Produtos", "Lançamentos", "Transferências", "Estoque", "Relatórios", "Importar Excel", "Importar WhatsApp"],
 )
 
-# --- Router ---
 if page == "Painel":
     painel.render(st, qdf)
 
@@ -100,6 +92,9 @@ elif page == "Produtos":
 elif page == "Lançamentos":
     lancamentos.render(st, qdf, qexec, garantir_produto, get_filial_id)
 
+elif page == "Transferências":
+    transferencias.render(st, qdf, qexec, get_filial_id)
+
 elif page == "Estoque":
     estoque.render(st, qdf, qexec, get_filial_id)
 
@@ -107,7 +102,7 @@ elif page == "Relatórios":
     relatorios.render(st, qdf)
 
 elif page == "Importar Excel":
-    importar_excel.render(st, qdf, qexec, garantir_produto)
+    importar_excel.render(st, qdf, qexec)
 
 elif page == "Importar WhatsApp":
     importar_whatsapp.render(st, qdf, qexec, garantir_produto, get_filial_id)
