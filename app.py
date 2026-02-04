@@ -90,7 +90,7 @@ def garantir_produto(categoria: str, produto_nome: str) -> int:
     return int(df.iloc[0]["id"])
 
 # --- Sidebar ---
-st.sidebar.title("📦 Padaria")
+st.sidebar.title("📦 CONTROLE DTCH")
 page = st.sidebar.radio(
     "Menu",
     [

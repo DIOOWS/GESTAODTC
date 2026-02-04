@@ -3,88 +3,58 @@ import pandas as pd
 
 
 def render(st, qdf, qexec, garantir_produto, get_filial_id):
-    st.header("Transferências (AUSTIN → QUEIMADOS)")
+    st.header("Transferências")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     d = col1.date_input("Data", value=date.today())
-    obs = col2.text_input("Observações (opcional)", value="")
+    de_filial = col2.selectbox("De", ["AUSTIN", "QUEIMADOS"], index=0)
+    para_filial = col3.selectbox("Para", ["QUEIMADOS", "AUSTIN"], index=0)
 
-    st.caption("Registra o que saiu do AUSTIN e entrou no QUEIMADOS. Ajusta o estoque dos dois no mesmo dia.")
+    if de_filial == para_filial:
+        st.warning("Origem e destino não podem ser iguais.")
+        st.stop()
 
-    produtos = qdf("""
+    df_prod = qdf("""
         SELECT id, categoria, produto
         FROM products
-        WHERE ativo = TRUE
+        WHERE ativo=TRUE
         ORDER BY categoria, produto;
     """)
-
-    if produtos.empty:
-        st.warning("Nenhum produto cadastrado ainda.")
+    if df_prod.empty:
+        st.info("Cadastre produtos primeiro.")
         return
 
-    produto_id = st.selectbox(
-        "Produto",
-        options=produtos["id"].tolist(),
-        format_func=lambda pid: f"{produtos.loc[produtos['id']==pid,'categoria'].iloc[0]} - {produtos.loc[produtos['id']==pid,'produto'].iloc[0]}",
-    )
+    opcoes = (df_prod["categoria"] + " | " + df_prod["produto"]).tolist()
+    escolha = st.selectbox("Produto", opcoes, index=0)
+    qtd = st.number_input("Quantidade", min_value=0, step=1, value=0)
+    obs = st.text_input("Observações (opcional)")
 
-    qtd = st.number_input("Quantidade", min_value=0.0, value=0.0, step=1.0)
-
-    if st.button("Registrar transferência"):
+    if st.button("Salvar transferência"):
         try:
-            if qtd <= 0:
-                st.warning("Quantidade precisa ser maior que 0.")
-                st.stop()
+            de_id = get_filial_id(de_filial)
+            para_id = get_filial_id(para_filial)
 
-            de_id = get_filial_id("AUSTIN")
-            para_id = get_filial_id("QUEIMADOS")
+            idx = opcoes.index(escolha)
+            product_id = int(df_prod.iloc[idx]["id"])
 
-            # histórico
             qexec("""
                 INSERT INTO transferencias (data, de_filial_id, para_filial_id, product_id, quantidade, observacoes)
                 VALUES (:data, :de, :para, :pid, :qtd, :obs);
-            """, {"data": d, "de": de_id, "para": para_id, "pid": int(produto_id), "qtd": float(qtd), "obs": obs})
+            """, {"data": d, "de": de_id, "para": para_id, "pid": product_id, "qtd": int(qtd), "obs": obs})
 
-            # aplica no estoque: AUSTIN -, QUEIMADOS +
-            qexec("""
-                INSERT INTO movimentos (data, filial_id, product_id, estoque)
-                VALUES (:data, :filial, :pid, :delta)
-                ON CONFLICT (data, filial_id, product_id)
-                DO UPDATE SET estoque = COALESCE(movimentos.estoque,0) + EXCLUDED.estoque;
-            """, {"data": d, "filial": de_id, "pid": int(produto_id), "delta": -float(qtd)})
-
-            qexec("""
-                INSERT INTO movimentos (data, filial_id, product_id, estoque)
-                VALUES (:data, :filial, :pid, :delta)
-                ON CONFLICT (data, filial_id, product_id)
-                DO UPDATE SET estoque = COALESCE(movimentos.estoque,0) + EXCLUDED.estoque;
-            """, {"data": d, "filial": para_id, "pid": int(produto_id), "delta": float(qtd)})
-
-            st.success("Transferência registrada e estoque ajustado.")
-            st.rerun()
-
+            st.success("Transferência salva!")
         except Exception as e:
-            st.error(f"Erro ao registrar: {e}")
+            st.error(f"Erro ao salvar: {e}")
 
     st.divider()
-    st.subheader("Histórico (últimas 200)")
-
-    df = qdf("""
-        SELECT
-          t.id,
-          t.data,
-          f1.nome AS de_filial,
-          f2.nome AS para_filial,
-          p.categoria,
-          p.produto,
-          t.quantidade,
-          t.observacoes
+    st.subheader("Histórico (últimos 30 dias)")
+    df_hist = qdf("""
+        SELECT t.data, f1.nome AS de, f2.nome AS para, p.categoria, p.produto, t.quantidade, t.observacoes
         FROM transferencias t
         JOIN filiais f1 ON f1.id = t.de_filial_id
         JOIN filiais f2 ON f2.id = t.para_filial_id
         JOIN products p ON p.id = t.product_id
-        ORDER BY t.data DESC, t.id DESC
-        LIMIT 200;
+        WHERE t.data >= (CURRENT_DATE - INTERVAL '30 days')
+        ORDER BY t.data DESC, de, para, p.categoria, p.produto;
     """)
-
-    st.dataframe(df, width="stretch", hide_index=True)
+    st.dataframe(df_hist, width="stretch", hide_index=True)
