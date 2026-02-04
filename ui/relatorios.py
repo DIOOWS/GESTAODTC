@@ -79,3 +79,30 @@ def render(st, qdf, get_filial_id):
         mime="text/csv"
     )
 
+    st.dataframe(df, width="stretch", hide_index=True)
+
+    # ---------- EXPORTAR EXCEL ----------
+    df = qdf(""" 
+       ... query grande ...
+    """, params)
+
+    st.dataframe(df, width="stretch", hide_index=True)
+
+    # 👇 SÓ ISSO AQUI É NOVO
+    if not df.empty:
+        from io import BytesIO
+        import pandas as pd
+
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="Relatório", index=False)
+
+        st.download_button(
+            label="⬇️ Baixar Excel (.xlsx)",
+            data=buffer.getvalue(),
+            file_name=f"relatorio_{d1}_{d2}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+
+
