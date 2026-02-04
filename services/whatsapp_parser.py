@@ -1,164 +1,122 @@
 import re
 from unidecode import unidecode
-from difflib import get_close_matches
-
-# item termina com quantidade (último token numérico)
-RE_ITEM_QTD_END = re.compile(r"^(?P<txt>.+?)\s+(?P<qtd>-?\d+)\s*$")
-# "CATEGORIA - PRODUTO 2" ou "CATEGORIA – PRODUTO 2"
-RE_CAT_ITEM = re.compile(r"^(?P<cat>[^-–]+?)\s*[-–]\s*(?P<prod>.+?)\s+(?P<qtd>-?\d+)\s*$")
-
-# remove coisas comuns que aparecem no texto do WhatsApp
-RE_JUNK_PREFIX = re.compile(r"^(?:\d+\)|\d+\.)\s*")          # "1) " / "1. "
-RE_WA_TIME = re.compile(r"^\[?\d{1,2}:\d{2}\]?\s*")          # "[08:31] "
-RE_WA_DATE = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}\s*-\s*")  # "02/02/2026 - "
-RE_WA_SENDER = re.compile(r"^[^:]{1,30}:\s+")                # "Fulano: "
-RE_ONLY_NUM = re.compile(r"^\d+$")
 
 
-def _norm(s: str) -> str:
-    s = (s or "").strip().upper()
-    s = unidecode(s)
+def _clean(s: str) -> str:
+    s = (s or "").strip()
+    s = s.replace("\u00a0", " ")
     s = re.sub(r"\s+", " ", s)
-    # mantém letras/números/espaço (sem pontuação)
-    s = re.sub(r"[^A-Z0-9 ]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    return s.strip()
 
 
-def _clean_line(raw: str) -> str:
-    raw = (raw or "").strip()
+def _has_number(line: str) -> bool:
+    return re.search(r"\d", line) is not None
 
-    # remove bullets e numeradores
-    raw = raw.lstrip("-•* ").strip()
-    raw = RE_JUNK_PREFIX.sub("", raw)
 
-    # remove prefixos típicos de export do WhatsApp
-    raw = RE_WA_DATE.sub("", raw)
-    raw = RE_WA_TIME.sub("", raw)
-    raw = RE_WA_SENDER.sub("", raw)
+def _is_header(line: str) -> bool:
+    """
+    Detecta categorias:
+    - "*BRIOCHES*"
+    - "BOLO RETANGULAR" (caps)
+    - "Padaria" (linha curta sem número)
+    """
+    t = _clean(line)
+    if not t:
+        return False
 
-    # remove "R$" etc
-    raw = raw.replace("R$", " ").replace("RS", " ")
-    raw = re.sub(r"\s+", " ", raw).strip()
-    return raw
+    # Entre asteriscos
+    if t.startswith("*") and t.endswith("*") and len(t) >= 3:
+        return True
+
+    # Se tiver número, não é header
+    if _has_number(t):
+        return False
+
+    # Se for “quase tudo” maiúsculo
+    letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", t)
+    if letters and letters.upper() == letters and len(letters) >= 4:
+        return True
+
+    # Linha curta sem número (ex: "Padaria")
+    # (evita pegar frases longas como categoria)
+    if len(t) <= 25:
+        return True
+
+    return False
+
+
+def _normalize_category(line: str) -> str:
+    t = _clean(line)
+    if t.startswith("*") and t.endswith("*"):
+        t = t[1:-1]
+    t = _clean(t)
+    return t.upper()
+
+
+def _to_number(q: str) -> float:
+    q = _clean(q).replace(",", ".")
+    try:
+        return float(q)
+    except Exception:
+        return 0.0
+
+
+def _normalize_product_name(name: str) -> str:
+    name = _clean(name)
+    name = name.lstrip("-•").strip()
+    name = name.rstrip(":").strip()
+    return name.upper()
 
 
 def parse_whatsapp_text(texto: str):
     """
-    Retorna itens [{categoria, produto, quantidade}]
-    - Categoria pode vir como cabeçalho (linha sem número final)
-    - Item é linha com quantidade no final
-    - Aceita "CATEGORIA - PRODUTO 2"
-    """
-    if not texto:
-        return []
+    Retorna:
+      { "categoria": "...", "produto": "...", "quantidade": 12.0 }
 
-    linhas = [l for l in texto.splitlines()]
-    linhas = [_clean_line(l) for l in linhas]
-    linhas = [l for l in linhas if l and not l.lower().startswith("http")]
+    Aceita:
+      - "24 torrada temperada" (qtd no começo)
+      - "torrada temperada 24" (qtd no fim)
+    Mantém números finais no produto quando o número inicial já é a quantidade
+    (ex: "3 broa de coco com 6" -> qtd=3, produto="BROA DE COCO COM 6")
+    """
+    texto = texto or ""
+    linhas = texto.splitlines()
 
     itens = []
-    categoria_atual = ""
+    categoria_atual = "(SEM)"
+
+    rx_ini = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s+(.+?)\s*$")  # 24 pão...
+    rx_fim = re.compile(r"^\s*(.+?)\s+(\d+(?:[.,]\d+)?)\s*$")  # pão... 24
 
     for raw in linhas:
-        # ignora linhas que são só números
-        if RE_ONLY_NUM.match(raw):
+        line = _clean(raw)
+        if not line:
             continue
 
-        # caso "CATEGORIA - PRODUTO 2"
-        m2 = RE_CAT_ITEM.match(raw)
-        if m2:
-            cat = _norm(m2.group("cat"))
-            prod = _norm(m2.group("prod"))
-            qtd = int(m2.group("qtd"))
-            if cat and prod:
-                itens.append({"categoria": cat, "produto": prod, "quantidade": qtd})
+        # Categoria
+        if _is_header(line):
+            categoria_atual = _normalize_category(line)
             continue
 
-        # item normal "PRODUTO 2"
-        m = RE_ITEM_QTD_END.match(raw)
+        # Quantidade no início
+        m = rx_ini.match(line)
         if m:
-            txt = _norm(m.group("txt"))
-            qtd = int(m.group("qtd"))
-
-            # Se "txt" ficou vazio, ignora
-            if not txt:
-                continue
-
-            # Se a "categoria_atual" estiver vazia, cai em SEM CATEGORIA
-            cat = _norm(categoria_atual) or "SEM CATEGORIA"
-            itens.append({"categoria": cat, "produto": txt, "quantidade": qtd})
+            qtd = _to_number(m.group(1))
+            prod = _normalize_product_name(m.group(2))
+            if qtd > 0 and prod:
+                itens.append({"categoria": categoria_atual, "produto": prod, "quantidade": qtd})
             continue
 
-        # senão, é cabeçalho de categoria
-        cat = _norm(raw)
-        if cat:
-            categoria_atual = cat
+        # Quantidade no fim (fallback)
+        m = rx_fim.match(line)
+        if m:
+            prod = _normalize_product_name(m.group(1))
+            qtd = _to_number(m.group(2))
+            if qtd > 0 and prod:
+                itens.append({"categoria": categoria_atual, "produto": prod, "quantidade": qtd})
+            continue
+
+        # Linha sem número: ignora (comentários soltos)
+        continue
 
     return itens
-
-
-def corrigir_itens_com_base_no_banco(itens, produtos_existentes):
-    """
-    produtos_existentes: lista de dicts {id, categoria, produto}
-    Retorna itens com:
-      - categoria/produto padronizados pro que já existe
-      - product_id se achou match
-      - corrigido True/False
-    """
-    if not itens:
-        return []
-
-    by_cat_prod = {}
-    by_cat = {}
-    all_prod_norm = {}
-    prod_norm_to_id = {}
-
-    for p in produtos_existentes:
-        cat = _norm(p["categoria"])
-        prod = _norm(p["produto"])
-        by_cat_prod[(cat, prod)] = (p["id"], p["categoria"], p["produto"])
-        by_cat.setdefault(cat, []).append(prod)
-        all_prod_norm[prod] = (p["id"], p["categoria"], p["produto"])
-        prod_norm_to_id[prod] = p["id"]
-
-    corrigidos = []
-    for it in itens:
-        cat_in = _norm(it.get("categoria"))
-        prod_in = _norm(it.get("produto"))
-        qtd = int(it.get("quantidade") or 0)
-
-        product_id = None
-        cat_out = (it.get("categoria") or "").strip().upper()
-        prod_out = (it.get("produto") or "").strip().upper()
-        ok = False
-
-        # 1) match exato categoria+produto
-        if (cat_in, prod_in) in by_cat_prod:
-            product_id, cat_out, prod_out = by_cat_prod[(cat_in, prod_in)]
-            ok = True
-        else:
-            # 2) close match dentro da categoria
-            cand = by_cat.get(cat_in, [])
-            cm = get_close_matches(prod_in, cand, n=1, cutoff=0.84)
-            if cm:
-                pid, cat_out, prod_out = by_cat_prod[(cat_in, cm[0])]
-                product_id = pid
-                ok = True
-            else:
-                # 3) close match global (produto)
-                cm2 = get_close_matches(prod_in, list(all_prod_norm.keys()), n=1, cutoff=0.88)
-                if cm2:
-                    pid, cat_out, prod_out = all_prod_norm[cm2[0]]
-                    product_id = pid
-                    ok = True
-
-        corrigidos.append({
-            "product_id": product_id,
-            "categoria": (cat_out or "").strip().upper(),
-            "produto": (prod_out or "").strip().upper(),
-            "quantidade": qtd,
-            "corrigido": bool(ok),
-        })
-
-    return corrigidos

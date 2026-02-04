@@ -85,38 +85,77 @@ def render(st, qdf, qexec, get_filial_id):
 
         if st.button("Salvar alterações"):
             try:
-                # 1) Atualiza nomes/categorias em products
-                # 2) Atualiza números em movimentos (upsert)
                 for _, r in edited.iterrows():
                     pid = int(r["product_id"])
                     cat = str(r["categoria"]).strip().upper()
                     prod = str(r["produto"]).strip().upper()
 
-                    # Atualiza o cadastro do produto (se mudou)
-                    qexec("""
-                        UPDATE products
-                        SET categoria=:c, produto=:p
-                        WHERE id=:id;
-                    """, {"c": cat, "p": prod, "id": pid})
+                    # Se já existe outro produto com esse mesmo (categoria,produto), vamos fazer MERGE
+                    df_exist = qdf("""
+                               SELECT id
+                               FROM products
+                               WHERE categoria=:c AND produto=:p AND id<>:id AND ativo=TRUE
+                               LIMIT 1;
+                           """, {"c": cat, "p": prod, "id": pid})
 
-                    # Upsert dos números no dia/filial
+                    target_pid = pid
+                    if not df_exist.empty:
+                        target_pid = int(df_exist.iloc[0]["id"])
+
+                        # 1) move movimentos do pid antigo -> target_pid (sem criar duplicata)
+                        # Se já existir movimento no target no mesmo (data,filial), soma os campos e apaga o antigo
+                        qexec("""
+                                   INSERT INTO movimentos (data, filial_id, product_id,
+                                       estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes)
+                                   SELECT data, filial_id, :target,
+                                       estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes
+                                   FROM movimentos
+                                   WHERE product_id = :old
+                                   ON CONFLICT (data, filial_id, product_id)
+                                   DO UPDATE SET
+                                       estoque = movimentos.estoque + EXCLUDED.estoque,
+                                       produzido_planejado = movimentos.produzido_planejado + EXCLUDED.produzido_planejado,
+                                       produzido_real = movimentos.produzido_real + EXCLUDED.produzido_real,
+                                       vendido = movimentos.vendido + EXCLUDED.vendido,
+                                       desperdicio = movimentos.desperdicio + EXCLUDED.desperdicio,
+                                       observacoes = COALESCE(movimentos.observacoes,'') || ' | merge';
+                               """, {"old": pid, "target": target_pid})
+
+                        qexec("DELETE FROM movimentos WHERE product_id=:old;", {"old": pid})
+
+                        # 2) move transferencias
+                        qexec("UPDATE transferencias SET product_id=:target WHERE product_id=:old;",
+                              {"old": pid, "target": target_pid})
+
+                        # 3) desativa produto antigo
+                        qexec("UPDATE products SET ativo=FALSE WHERE id=:old;", {"old": pid})
+
+                    else:
+                        # Não existe duplicado → pode atualizar o cadastro do próprio produto
+                        qexec("""
+                                   UPDATE products
+                                   SET categoria=:c, produto=:p
+                                   WHERE id=:id;
+                               """, {"c": cat, "p": prod, "id": pid})
+
+                    # Agora salva os números no movimento usando o target_pid (se houve merge)
                     qexec("""
-                        INSERT INTO movimentos
-                          (data, filial_id, product_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes)
-                        VALUES
-                          (:data, :filial, :pid, :e, :pp, :pr, :v, :d, :obs)
-                        ON CONFLICT (data, filial_id, product_id)
-                        DO UPDATE SET
-                          estoque = EXCLUDED.estoque,
-                          produzido_planejado = EXCLUDED.produzido_planejado,
-                          produzido_real = EXCLUDED.produzido_real,
-                          vendido = EXCLUDED.vendido,
-                          desperdicio = EXCLUDED.desperdicio,
-                          observacoes = EXCLUDED.observacoes;
-                    """, {
+                               INSERT INTO movimentos
+                                 (data, filial_id, product_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes)
+                               VALUES
+                                 (:data, :filial, :pid, :e, :pp, :pr, :v, :d, :obs)
+                               ON CONFLICT (data, filial_id, product_id)
+                               DO UPDATE SET
+                                 estoque = EXCLUDED.estoque,
+                                 produzido_planejado = EXCLUDED.produzido_planejado,
+                                 produzido_real = EXCLUDED.produzido_real,
+                                 vendido = EXCLUDED.vendido,
+                                 desperdicio = EXCLUDED.desperdicio,
+                                 observacoes = EXCLUDED.observacoes;
+                           """, {
                         "data": d,
                         "filial": filial_id,
-                        "pid": pid,
+                        "pid": target_pid,
                         "e": int(r["estoque"] or 0),
                         "pp": int(r["produzido_planejado"] or 0),
                         "pr": int(r["produzido_real"] or 0),
@@ -125,12 +164,10 @@ def render(st, qdf, qexec, get_filial_id):
                         "obs": "Editado no Estoque"
                     })
 
-                st.success("Alterações salvas! Recarregue a página para ver o saldo recalculado.")
+                st.success("Alterações salvas! (com merge automático quando houver duplicata)")
                 st.rerun()
 
             except Exception as e:
                 st.error(f"Erro ao salvar: {e}")
-    else:
-        st.dataframe(df, width="stretch", hide_index=True)
 
     st.caption("Saldo calculado = estoque + produção (planejada+real) - venda - desperdício - transf(saída) + transf(entrada).")
