@@ -61,3 +61,21 @@ def render(st, qdf, get_filial_id):
     """, params)
 
     st.dataframe(df, width="stretch", hide_index=True)
+
+    st.dataframe(df, width="stretch", hide_index=True)
+
+    # --- Export CSV (Excel PT-BR) ---
+    csv = df.to_csv(
+        sep=";",              # Excel PT-BR abre em colunas
+        index=False,
+        encoding="utf-8-sig", # mantém acentos no Excel
+        decimal=","           # opcional (números com vírgula)
+    )
+
+    st.download_button(
+        "⬇️ Baixar CSV (Excel)",
+        data=csv,
+        file_name=f"relatorio_{d1}_{d2}.csv",
+        mime="text/csv"
+    )
+
