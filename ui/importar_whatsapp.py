@@ -1,11 +1,51 @@
 from datetime import date
 import pandas as pd
+import streamlit as st
 
-from services.whatsapp_parser import parse_whatsapp_text, corrigir_itens_com_base_no_banco
+from services.whatsapp_parser import parse_whatsapp_text
+
+
+def _to_num(x):
+    try:
+        if x is None:
+            return 0.0
+        if isinstance(x, str):
+            x = x.replace(",", ".").strip()
+        return float(x)
+    except Exception:
+        return 0.0
+
+
+def _collect_ignored_lines(texto: str):
+    """
+    Retorna lista de dicts: {"linha": "...", "motivo": "..."}
+    Baseado em regras simples:
+    - Linha vazia -> ignora
+    - Header -> não é item
+    - Sem número -> ignora
+    """
+    import re
+    from services.whatsapp_parser import _clean, _is_header
+
+    ignored = []
+    for raw in (texto or "").splitlines():
+        line = _clean(raw)
+        if not line:
+            continue
+        if _is_header(line):
+            ignored.append({"linha": line, "motivo": "Categoria/título"})
+            continue
+        if not re.search(r"\d", line):
+            ignored.append({"linha": line, "motivo": "Sem número (não parece item)"})
+            continue
+        # tem número mas o parser pode não pegar (ex: formato estranho)
+        # aqui a gente marca como "não reconhecido" só se não entrar nos itens
+        # (essa parte é tratada depois comparando com os itens detectados)
+    return ignored
 
 
 def render(st, qdf, qexec, garantir_produto, get_filial_id):
-    st.header("Importar WhatsApp (texto)")
+    st.header("Importar WhatsApp (texto livre)")
 
     col1, col2 = st.columns(2)
     filial = col1.selectbox("Filial", ["AUSTIN", "QUEIMADOS"], index=0)
@@ -13,108 +53,130 @@ def render(st, qdf, qexec, garantir_produto, get_filial_id):
 
     salvar_como = st.radio(
         "Salvar como:",
-        ["Estoque (contagem do fim do dia)", "Produzido planejado (pedido p/ amanhã)"],
-        index=0
+        ["Estoque (contagem)", "Produzido planejado"],
+        index=0,
+        horizontal=True,
     )
 
-    modo = st.radio(
-        "Como gravar no banco?",
-        ["Somar (recomendado)", "Substituir"],
-        index=0
-    )
+    somar = st.checkbox("Somar ao valor já salvo (em vez de substituir)", value=False)
 
-    texto = st.text_area("Cole o texto do WhatsApp aqui", height=260)
+    texto = st.text_area("Cole o texto aqui", height=280)
 
     if st.button("Processar"):
-        itens_raw = parse_whatsapp_text(texto)
+        itens = parse_whatsapp_text(texto)
 
-        if not itens_raw:
-            st.warning("Não detectei itens. Dica: cada linha de produto precisa terminar com um número (ex: 'PRESTÍGIO 2').")
-            st.stop()
-
-        df_prod = qdf("SELECT id, categoria, produto FROM products WHERE ativo=TRUE;")
-        produtos_exist = df_prod.to_dict(orient="records")
-        itens = corrigir_itens_com_base_no_banco(itens_raw, produtos_exist)
+        if not itens:
+            st.warning("Não detectei itens. Confere se as linhas têm número (ex: '24 torrada temperada').")
+            st.session_state.pop("_wa_df", None)
+            st.session_state.pop("_wa_raw", None)
+            return
 
         df = pd.DataFrame(itens)
-        st.write(f"Itens detectados: {len(itens)}")
-        st.dataframe(df, width="stretch", hide_index=True)
 
-        st.session_state["_wa_itens"] = itens
+        # normaliza tipos
+        df["categoria"] = df["categoria"].astype(str)
+        df["produto"] = df["produto"].astype(str)
+        df["quantidade"] = df["quantidade"].apply(_to_num)
+
+        st.session_state["_wa_df"] = df
+        st.session_state["_wa_raw"] = texto
         st.session_state["_wa_filial"] = filial
         st.session_state["_wa_data"] = d
         st.session_state["_wa_salvar_como"] = salvar_como
-        st.session_state["_wa_modo"] = modo
+        st.session_state["_wa_somar"] = somar
 
-    itens = st.session_state.get("_wa_itens")
-    if not itens:
-        return
+    df = st.session_state.get("_wa_df")
+    if df is not None and not df.empty:
+        st.subheader(f"Itens detectados: {len(df)}")
 
-    st.divider()
-    st.subheader("Ajustar antes de salvar (você pode corrigir nome e número)")
+        # Editor pra corrigir antes de salvar
+        edited = st.data_editor(
+            df,
+            width="stretch",
+            hide_index=True,
+            num_rows="dynamic",
+            column_config={
+                "categoria": st.column_config.TextColumn("categoria"),
+                "produto": st.column_config.TextColumn("produto"),
+                "quantidade": st.column_config.NumberColumn("quantidade", step=1),
+            },
+        )
 
-    df_edit = pd.DataFrame(itens)
+        st.session_state["_wa_df"] = edited
 
-    edited = st.data_editor(
-        df_edit,
-        width="stretch",
-        hide_index=True,
-        num_rows="fixed",
-        column_config={
-            "product_id": st.column_config.NumberColumn("product_id", disabled=True),
-            "quantidade": st.column_config.NumberColumn("quantidade", step=1),
-            "corrigido": st.column_config.CheckboxColumn("corrigido", disabled=True),
-        },
-    )
+        # Linhas ignoradas
+        st.subheader("Linhas ignoradas (para você conferir)")
+        ignored = _collect_ignored_lines(st.session_state.get("_wa_raw", ""))
 
-    if st.button("Salvar no banco"):
-        try:
-            filial_id = get_filial_id(st.session_state["_wa_filial"])
-            d = st.session_state["_wa_data"]
-            salvar_como = st.session_state["_wa_salvar_como"]
-            modo = st.session_state["_wa_modo"]
+        # marca também linhas “com número” que não viraram item detectado
+        raw_lines = []
+        for raw in (st.session_state.get("_wa_raw", "") or "").splitlines():
+            raw_lines.append(raw.strip())
+        detected_set = set()
+        for _, r in edited.iterrows():
+            detected_set.add(f"{str(r.get('categoria','')).strip()}|{str(r.get('produto','')).strip()}|{_to_num(r.get('quantidade'))}")
 
-            campo = "estoque" if salvar_como.startswith("Estoque") else "produzido_planejado"
+        # só uma exibição simples (sem ficar pesado)
+        if ignored:
+            st.dataframe(pd.DataFrame(ignored), width="stretch", hide_index=True)
+        else:
+            st.caption("Nenhuma linha foi ignorada como 'categoria' ou 'sem número'.")
 
-            for _, row in edited.iterrows():
-                categoria = str(row["categoria"]).strip().upper()
-                produto = str(row["produto"]).strip().upper()
-                qtd = int(row["quantidade"] or 0)
+        # Salvar
+        if st.button("Salvar no banco"):
+            try:
+                filial = st.session_state["_wa_filial"]
+                d = st.session_state["_wa_data"]
+                salvar_como = st.session_state["_wa_salvar_como"]
+                somar = st.session_state["_wa_somar"]
 
-                # garante produto (se usuário corrigiu, vira o novo padrão)
-                pid = garantir_produto(categoria, produto)
+                filial_id = get_filial_id(filial)
 
-                if modo.startswith("Substituir"):
-                    qexec(f"""
-                        INSERT INTO movimentos (data, filial_id, product_id, {campo}, observacoes)
-                        VALUES (:data, :filial, :pid, :qtd, :obs)
-                        ON CONFLICT (data, filial_id, product_id)
-                        DO UPDATE SET {campo} = EXCLUDED.{campo},
-                                      observacoes = EXCLUDED.observacoes;
-                    """, {
-                        "data": d,
-                        "filial": filial_id,
-                        "pid": pid,
-                        "qtd": qtd,
-                        "obs": f"Import WhatsApp ({campo}) - substituir"
-                    })
-                else:
-                    qexec(f"""
-                        INSERT INTO movimentos (data, filial_id, product_id, {campo}, observacoes)
-                        VALUES (:data, :filial, :pid, :qtd, :obs)
-                        ON CONFLICT (data, filial_id, product_id)
-                        DO UPDATE SET {campo} = movimentos.{campo} + EXCLUDED.{campo},
-                                      observacoes = EXCLUDED.observacoes;
-                    """, {
-                        "data": d,
-                        "filial": filial_id,
-                        "pid": pid,
-                        "qtd": qtd,
-                        "obs": f"Import WhatsApp ({campo}) - somar"
-                    })
+                campo = "estoque" if salvar_como.startswith("Estoque") else "produzido_planejado"
 
-            st.success("Salvo com sucesso!")
-            st.session_state.pop("_wa_itens", None)
+                # salva linha a linha
+                for _, r in edited.iterrows():
+                    categoria = str(r.get("categoria", "")).strip().upper()
+                    produto = str(r.get("produto", "")).strip().upper()
+                    quantidade = _to_num(r.get("quantidade", 0))
 
-        except Exception as e:
-            st.error(f"Erro ao salvar: {e}")
+                    if not categoria or not produto:
+                        continue
+                    if quantidade == 0:
+                        continue
+
+                    product_id = garantir_produto(categoria, produto)
+
+                    if somar:
+                        # soma no valor já existente
+                        qexec(f"""
+                            INSERT INTO movimentos (data, filial_id, product_id, {campo})
+                            VALUES (:data, :filial, :pid, :qtd)
+                            ON CONFLICT (data, filial_id, product_id)
+                            DO UPDATE SET {campo} = COALESCE(movimentos.{campo},0) + EXCLUDED.{campo};
+                        """, {
+                            "data": d,
+                            "filial": filial_id,
+                            "pid": product_id,
+                            "qtd": quantidade
+                        })
+                    else:
+                        # substitui
+                        qexec(f"""
+                            INSERT INTO movimentos (data, filial_id, product_id, {campo})
+                            VALUES (:data, :filial, :pid, :qtd)
+                            ON CONFLICT (data, filial_id, product_id)
+                            DO UPDATE SET {campo} = EXCLUDED.{campo};
+                        """, {
+                            "data": d,
+                            "filial": filial_id,
+                            "pid": product_id,
+                            "qtd": quantidade
+                        })
+
+                st.success("Salvo com sucesso!")
+                st.session_state.pop("_wa_df", None)
+                st.session_state.pop("_wa_raw", None)
+
+            except Exception as e:
+                st.error(f"Erro ao salvar: {e}")

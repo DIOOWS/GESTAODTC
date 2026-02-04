@@ -1,173 +1,132 @@
-from datetime import date
 import pandas as pd
+import streamlit as st
+from sqlalchemy.exc import IntegrityError
 
 
-def render(st, qdf, qexec, get_filial_id):
-    st.header("Estoque (por dia e filial)")
+def _find_existing_product_id(qdf, categoria, produto, exclude_id=None):
+    sql = "SELECT id FROM products WHERE categoria=:c AND produto=:p"
+    params = {"c": categoria, "p": produto}
+    df = qdf(sql + (" AND id<>:id" if exclude_id else "") + ";",
+             {**params, **({"id": exclude_id} if exclude_id else {})})
+    if df.empty:
+        return None
+    return int(df.iloc[0]["id"])
 
-    col1, col2, col3 = st.columns([2, 2, 2])
-    filial = col1.selectbox("Filial", ["AUSTIN", "QUEIMADOS"], index=0)
-    d = col2.date_input("Data", value=date.today())
-    modo_edicao = col3.checkbox("Modo edição", value=True)
 
-    filial_id = get_filial_id(filial)
+def _merge_products(qexec, from_id: int, to_id: int):
+    # move movimentos
+    qexec("""
+        UPDATE movimentos
+        SET product_id = :to_id
+        WHERE product_id = :from_id;
+    """, {"from_id": from_id, "to_id": to_id})
+
+    # move transferencias (se existir tabela)
+    try:
+        qexec("""
+            UPDATE transferencias
+            SET product_id = :to_id
+            WHERE product_id = :from_id;
+        """, {"from_id": from_id, "to_id": to_id})
+    except Exception:
+        pass
+
+    # apaga produto antigo
+    qexec("DELETE FROM products WHERE id=:id;", {"id": from_id})
+
+
+def render(st, qdf, qexec):
+    st.header("Produtos")
 
     df = qdf("""
-        WITH mov AS (
-            SELECT *
-            FROM movimentos
-            WHERE filial_id = :f AND data = :d
-        ),
-        tin AS (
-            SELECT product_id, COALESCE(SUM(quantidade),0) AS transf_in
-            FROM transferencias
-            WHERE para_filial_id = :f AND data = :d
-            GROUP BY product_id
-        ),
-        tout AS (
-            SELECT product_id, COALESCE(SUM(quantidade),0) AS transf_out
-            FROM transferencias
-            WHERE de_filial_id = :f AND data = :d
-            GROUP BY product_id
-        )
-        SELECT
-          p.id AS product_id,
-          p.categoria,
-          p.produto,
-          COALESCE(m.estoque,0) AS estoque,
-          COALESCE(m.produzido_planejado,0) AS produzido_planejado,
-          COALESCE(m.produzido_real,0) AS produzido_real,
-          COALESCE(m.vendido,0) AS vendido,
-          COALESCE(m.desperdicio,0) AS desperdicio,
-          COALESCE(ti.transf_in,0) AS transf_in,
-          COALESCE(to2.transf_out,0) AS transf_out,
-          (
-            COALESCE(m.estoque,0)
-            + COALESCE(m.produzido_planejado,0)
-            + COALESCE(m.produzido_real,0)
-            - COALESCE(m.vendido,0)
-            - COALESCE(m.desperdicio,0)
-            - COALESCE(to2.transf_out,0)
-            + COALESCE(ti.transf_in,0)
-          ) AS saldo_calculado
-        FROM products p
-        LEFT JOIN mov m ON m.product_id = p.id
-        LEFT JOIN tin ti ON ti.product_id = p.id
-        LEFT JOIN tout to2 ON to2.product_id = p.id
-        WHERE p.ativo = TRUE
-        ORDER BY p.categoria, p.produto;
-    """, {"f": filial_id, "d": d})
+        SELECT id, categoria, produto, ativo
+        FROM products
+        ORDER BY categoria, produto;
+    """)
 
-    if df.empty:
-        st.info("Nenhum produto cadastrado.")
-        return
+    st.caption("Você pode editar categoria/nome/ativo aqui. Depois clique em **Salvar alterações**.")
 
-    st.caption("Você pode editar os números e também corrigir nomes/categorias. Clique em **Salvar alterações** no final.")
+    edited = st.data_editor(
+        df,
+        width="stretch",
+        hide_index=True,
+        num_rows="fixed",
+        disabled=["id"],
+        column_config={
+            "id": st.column_config.NumberColumn("id"),
+            "categoria": st.column_config.TextColumn("categoria"),
+            "produto": st.column_config.TextColumn("produto"),
+            "ativo": st.column_config.CheckboxColumn("ativo"),
+        },
+        key="prod_editor",
+    )
 
-    if modo_edicao:
-        edited = st.data_editor(
-            df,
-            width="stretch",
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "product_id": st.column_config.NumberColumn("product_id", disabled=True),
-                "transf_in": st.column_config.NumberColumn("transf_in", disabled=True),
-                "transf_out": st.column_config.NumberColumn("transf_out", disabled=True),
-                "saldo_calculado": st.column_config.NumberColumn("saldo_calculado", disabled=True),
-                "estoque": st.column_config.NumberColumn("estoque", step=1),
-                "produzido_planejado": st.column_config.NumberColumn("produzido_planejado", step=1),
-                "produzido_real": st.column_config.NumberColumn("produzido_real", step=1),
-                "vendido": st.column_config.NumberColumn("vendido", step=1),
-                "desperdicio": st.column_config.NumberColumn("desperdicio", step=1),
-            },
-        )
+    col1, col2 = st.columns(2)
 
-        if st.button("Salvar alterações"):
+    if col1.button("Salvar alterações"):
+        try:
+            # salva linha a linha
+            for _, r in edited.iterrows():
+                pid = int(r["id"])
+                c = str(r["categoria"]).strip().upper()
+                p = str(r["produto"]).strip().upper()
+                ativo = bool(r["ativo"])
+
+                qexec("""
+                    UPDATE products
+                    SET categoria=:c, produto=:p, ativo=:a
+                    WHERE id=:id;
+                """, {"c": c, "p": p, "a": ativo, "id": pid})
+
+            st.success("Alterações salvas.")
+            st.rerun()
+
+        except IntegrityError as e:
+            # normalmente pega UniqueViolation aqui
+            st.error(f"Erro ao salvar (duplicado): {e}")
+            st.info("Se você tentou renomear para um produto que já existe, use a opção **Mesclar** abaixo.")
+            st.session_state["_prod_save_error"] = str(e)
+
+        except Exception as e:
+            st.error(f"Erro ao salvar: {e}")
+
+    # Excluir / Mesclar
+    st.divider()
+    st.subheader("Excluir ou Mesclar produtos")
+
+    pid = col2.selectbox(
+        "Escolha um produto (id) para excluir/mesclar",
+        options=df["id"].tolist(),
+        format_func=lambda x: f"{int(x)} - {df.loc[df['id']==x,'categoria'].iloc[0]} / {df.loc[df['id']==x,'produto'].iloc[0]}",
+    )
+
+    st.warning("⚠️ Excluir produto remove também os movimentos/transferências ligados a ele (por cascade).")
+
+    c_del = str(df.loc[df["id"] == pid, "categoria"].iloc[0]).strip().upper()
+    p_del = str(df.loc[df["id"] == pid, "produto"].iloc[0]).strip().upper()
+
+    colA, colB = st.columns(2)
+
+    if colA.button("Excluir produto"):
+        try:
+            qexec("DELETE FROM products WHERE id=:id;", {"id": int(pid)})
+            st.success("Produto excluído.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao excluir: {e}")
+
+    st.caption("Mesclar serve quando você criou duplicado e quer juntar em um só (movimentos vão junto).")
+
+    target_id = _find_existing_product_id(qdf, c_del, p_del, exclude_id=int(pid))
+
+    if target_id:
+        st.info(f"Já existe outro produto com mesmo nome/categoria: ID {target_id}. Você pode mesclar.")
+        if colB.button("Mesclar (mover tudo pro existente e apagar este)"):
             try:
-                for _, r in edited.iterrows():
-                    pid = int(r["product_id"])
-                    cat = str(r["categoria"]).strip().upper()
-                    prod = str(r["produto"]).strip().upper()
-
-                    # Se já existe outro produto com esse mesmo (categoria,produto), vamos fazer MERGE
-                    df_exist = qdf("""
-                               SELECT id
-                               FROM products
-                               WHERE categoria=:c AND produto=:p AND id<>:id AND ativo=TRUE
-                               LIMIT 1;
-                           """, {"c": cat, "p": prod, "id": pid})
-
-                    target_pid = pid
-                    if not df_exist.empty:
-                        target_pid = int(df_exist.iloc[0]["id"])
-
-                        # 1) move movimentos do pid antigo -> target_pid (sem criar duplicata)
-                        # Se já existir movimento no target no mesmo (data,filial), soma os campos e apaga o antigo
-                        qexec("""
-                                   INSERT INTO movimentos (data, filial_id, product_id,
-                                       estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes)
-                                   SELECT data, filial_id, :target,
-                                       estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes
-                                   FROM movimentos
-                                   WHERE product_id = :old
-                                   ON CONFLICT (data, filial_id, product_id)
-                                   DO UPDATE SET
-                                       estoque = movimentos.estoque + EXCLUDED.estoque,
-                                       produzido_planejado = movimentos.produzido_planejado + EXCLUDED.produzido_planejado,
-                                       produzido_real = movimentos.produzido_real + EXCLUDED.produzido_real,
-                                       vendido = movimentos.vendido + EXCLUDED.vendido,
-                                       desperdicio = movimentos.desperdicio + EXCLUDED.desperdicio,
-                                       observacoes = COALESCE(movimentos.observacoes,'') || ' | merge';
-                               """, {"old": pid, "target": target_pid})
-
-                        qexec("DELETE FROM movimentos WHERE product_id=:old;", {"old": pid})
-
-                        # 2) move transferencias
-                        qexec("UPDATE transferencias SET product_id=:target WHERE product_id=:old;",
-                              {"old": pid, "target": target_pid})
-
-                        # 3) desativa produto antigo
-                        qexec("UPDATE products SET ativo=FALSE WHERE id=:old;", {"old": pid})
-
-                    else:
-                        # Não existe duplicado → pode atualizar o cadastro do próprio produto
-                        qexec("""
-                                   UPDATE products
-                                   SET categoria=:c, produto=:p
-                                   WHERE id=:id;
-                               """, {"c": cat, "p": prod, "id": pid})
-
-                    # Agora salva os números no movimento usando o target_pid (se houve merge)
-                    qexec("""
-                               INSERT INTO movimentos
-                                 (data, filial_id, product_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio, observacoes)
-                               VALUES
-                                 (:data, :filial, :pid, :e, :pp, :pr, :v, :d, :obs)
-                               ON CONFLICT (data, filial_id, product_id)
-                               DO UPDATE SET
-                                 estoque = EXCLUDED.estoque,
-                                 produzido_planejado = EXCLUDED.produzido_planejado,
-                                 produzido_real = EXCLUDED.produzido_real,
-                                 vendido = EXCLUDED.vendido,
-                                 desperdicio = EXCLUDED.desperdicio,
-                                 observacoes = EXCLUDED.observacoes;
-                           """, {
-                        "data": d,
-                        "filial": filial_id,
-                        "pid": target_pid,
-                        "e": int(r["estoque"] or 0),
-                        "pp": int(r["produzido_planejado"] or 0),
-                        "pr": int(r["produzido_real"] or 0),
-                        "v": int(r["vendido"] or 0),
-                        "d": int(r["desperdicio"] or 0),
-                        "obs": "Editado no Estoque"
-                    })
-
-                st.success("Alterações salvas! (com merge automático quando houver duplicata)")
+                _merge_products(qexec, from_id=int(pid), to_id=int(target_id))
+                st.success("Mesclado com sucesso.")
                 st.rerun()
-
             except Exception as e:
-                st.error(f"Erro ao salvar: {e}")
-
-    st.caption("Saldo calculado = estoque + produção (planejada+real) - venda - desperdício - transf(saída) + transf(entrada).")
+                st.error(f"Erro ao mesclar: {e}")
+    else:
+        colB.button("Mesclar", disabled=True)
