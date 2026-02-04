@@ -1,98 +1,81 @@
+# ui/transferencias.py
 from datetime import date
 import pandas as pd
-import streamlit as st
 
 
-def _to_num(x):
-    try:
-        if x is None:
-            return 0.0
-        if isinstance(x, str):
-            x = x.replace(",", ".").strip()
-        return float(x)
-    except Exception:
-        return 0.0
+def _get_filial_id(qdf, qexec, nome: str) -> int:
+    nome = (nome or "").strip().upper()
+    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome})
+    if not df.empty:
+        return int(df.iloc[0]["id"])
+    qexec("INSERT INTO filiais(nome) VALUES (:n) ON CONFLICT (nome) DO NOTHING;", {"n": nome})
+    df = qdf("SELECT id FROM filiais WHERE nome=:n;", {"n": nome})
+    return int(df.iloc[0]["id"])
 
 
-def render(st, qdf, qexec, get_filial_id):
-    st.header("Estoque (editável)")
+def render(st, qdf, qexec, garantir_produto=None, get_filial_id=None):
+    """
+    Aceita 5 argumentos (como app.py está chamando).
+    garantir_produto não é necessário aqui (transferência escolhe produto existente),
+    mas deixo para compatibilidade.
+    get_filial_id é opcional: se não vier, usa _get_filial_id interno.
+    """
+    st.header("Transferências")
 
-    col1, col2 = st.columns(2)
-    filial = col1.selectbox("Filial", ["AUSTIN", "QUEIMADOS"], index=0)
-    d = col2.date_input("Data", value=date.today())
+    col1, col2, col3 = st.columns(3)
+    d = col1.date_input("Data", value=date.today())
+    de_filial = col2.selectbox("De", ["AUSTIN", "QUEIMADOS"], index=0)
+    para_filial = col3.selectbox("Para", ["QUEIMADOS", "AUSTIN"], index=0)
 
-    filial_id = get_filial_id(filial)
+    if de_filial == para_filial:
+        st.warning("Origem e destino não podem ser iguais.")
+        st.stop()
 
-    df = qdf("""
-        SELECT
-          p.id AS product_id,
-          p.categoria,
-          p.produto,
-          COALESCE(m.estoque,0) AS estoque,
-          COALESCE(m.produzido_planejado,0) AS produzido_planejado,
-          COALESCE(m.produzido_real,0) AS produzido_real,
-          COALESCE(m.vendido,0) AS vendido,
-          COALESCE(m.desperdicio,0) AS desperdicio
-        FROM products p
-        LEFT JOIN movimentos m
-          ON m.product_id = p.id
-         AND m.filial_id = :f
-         AND m.data = :d
-        WHERE p.ativo = TRUE
-        ORDER BY p.categoria, p.produto;
-    """, {"f": filial_id, "d": d})
+    # fallback caso app não passe get_filial_id
+    if get_filial_id is None:
+        get_filial_id = lambda nome: _get_filial_id(qdf, qexec, nome)
 
-    st.caption("Edite os números e clique em **Salvar estoque do dia**.")
+    df_prod = qdf("""
+        SELECT id, categoria, produto
+        FROM products
+        WHERE ativo=TRUE
+        ORDER BY categoria, produto;
+    """)
+    if df_prod.empty:
+        st.info("Cadastre produtos primeiro.")
+        return
 
-    edited = st.data_editor(
-        df,
-        width="stretch",
-        hide_index=True,
-        disabled=["product_id", "categoria", "produto"],
-        column_config={
-            "estoque": st.column_config.NumberColumn("estoque", step=1),
-            "produzido_planejado": st.column_config.NumberColumn("produzido_planejado", step=1),
-            "produzido_real": st.column_config.NumberColumn("produzido_real", step=1),
-            "vendido": st.column_config.NumberColumn("vendido", step=1),
-            "desperdicio": st.column_config.NumberColumn("desperdicio", step=1),
-        },
-        key="estoque_editor",
-    )
+    opcoes = (df_prod["categoria"] + " | " + df_prod["produto"]).tolist()
+    escolha = st.selectbox("Produto", opcoes, index=0)
+    qtd = st.number_input("Quantidade", min_value=0, step=1, value=0)
+    obs = st.text_input("Observações (opcional)")
 
-    if st.button("Salvar estoque do dia"):
+    if st.button("Salvar transferência"):
         try:
-            for _, r in edited.iterrows():
-                pid = int(r["product_id"])
-                estoque = _to_num(r.get("estoque", 0))
-                pp = _to_num(r.get("produzido_planejado", 0))
-                pr = _to_num(r.get("produzido_real", 0))
-                vendido = _to_num(r.get("vendido", 0))
-                desp = _to_num(r.get("desperdicio", 0))
+            de_id = get_filial_id(de_filial)
+            para_id = get_filial_id(para_filial)
 
-                qexec("""
-                    INSERT INTO movimentos
-                      (data, filial_id, product_id, estoque, produzido_planejado, produzido_real, vendido, desperdicio)
-                    VALUES
-                      (:data, :filial, :pid, :e, :pp, :pr, :v, :d)
-                    ON CONFLICT (data, filial_id, product_id)
-                    DO UPDATE SET
-                      estoque = EXCLUDED.estoque,
-                      produzido_planejado = EXCLUDED.produzido_planejado,
-                      produzido_real = EXCLUDED.produzido_real,
-                      vendido = EXCLUDED.vendido,
-                      desperdicio = EXCLUDED.desperdicio;
-                """, {
-                    "data": d,
-                    "filial": filial_id,
-                    "pid": pid,
-                    "e": estoque,
-                    "pp": pp,
-                    "pr": pr,
-                    "v": vendido,
-                    "d": desp
-                })
+            idx = opcoes.index(escolha)
+            product_id = int(df_prod.iloc[idx]["id"])
 
-            st.success("Salvo com sucesso!")
-            st.rerun()
+            qexec("""
+                INSERT INTO transferencias (data, de_filial_id, para_filial_id, product_id, quantidade, observacoes)
+                VALUES (:data, :de, :para, :pid, :qtd, :obs);
+            """, {"data": d, "de": de_id, "para": para_id, "pid": product_id, "qtd": int(qtd), "obs": obs})
+
+            st.success("Transferência salva!")
         except Exception as e:
             st.error(f"Erro ao salvar: {e}")
+
+    st.divider()
+    st.subheader("Histórico (últimos 30 dias)")
+    df_hist = qdf("""
+        SELECT t.data, f1.nome AS de, f2.nome AS para, p.categoria, p.produto, t.quantidade, t.observacoes
+        FROM transferencias t
+        JOIN filiais f1 ON f1.id = t.de_filial_id
+        JOIN filiais f2 ON f2.id = t.para_filial_id
+        JOIN products p ON p.id = t.product_id
+        WHERE t.data >= (CURRENT_DATE - INTERVAL '30 days')
+        ORDER BY t.data DESC, de, para, p.categoria, p.produto;
+    """)
+    st.dataframe(df_hist, width="stretch", hide_index=True)
