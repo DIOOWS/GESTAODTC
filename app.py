@@ -107,7 +107,7 @@ page = st.sidebar.radio(
 
 # --- Router ---
 if page == "Painel":
-    painel.render(st, qdf)
+    painel.render(st, qdf, get_filial_id)
 
 elif page == "Produtos":
     produtos.render(st, qdf, qexec)
