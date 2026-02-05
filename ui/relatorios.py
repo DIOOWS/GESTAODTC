@@ -1,4 +1,6 @@
 from datetime import date, timedelta
+from io import BytesIO
+import pandas as pd
 
 
 def render(st, qdf, get_filial_id):
@@ -62,37 +64,8 @@ def render(st, qdf, get_filial_id):
 
     st.dataframe(df, width="stretch", hide_index=True)
 
-    st.dataframe(df, width="stretch", hide_index=True)
-
-    # --- Export CSV (Excel PT-BR) ---
-    csv = df.to_csv(
-        sep=";",              # Excel PT-BR abre em colunas
-        index=False,
-        encoding="utf-8-sig", # mantém acentos no Excel
-        decimal=","           # opcional (números com vírgula)
-    )
-
-    st.download_button(
-        "⬇️ Baixar CSV (Excel)",
-        data=csv,
-        file_name=f"relatorio_{d1}_{d2}.csv",
-        mime="text/csv"
-    )
-
-    st.dataframe(df, width="stretch", hide_index=True)
-
-    # ---------- EXPORTAR EXCEL ----------
-    df = qdf(""" 
-       ... query grande ...
-    """, params)
-
-    st.dataframe(df, width="stretch", hide_index=True)
-
-    # 👇 SÓ ISSO AQUI É NOVO
+    # ✅ Exportar Excel (não mexe na query / só usa o df pronto)
     if not df.empty:
-        from io import BytesIO
-        import pandas as pd
-
         buffer = BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="Relatório", index=False)
@@ -101,8 +74,5 @@ def render(st, qdf, get_filial_id):
             label="⬇️ Baixar Excel (.xlsx)",
             data=buffer.getvalue(),
             file_name=f"relatorio_{d1}_{d2}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
-
-
